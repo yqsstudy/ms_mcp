@@ -2,41 +2,66 @@
 
 A SessionState represents a single MCP connection/session.
 It owns:
+  - context_board: ContextBoard for parameter flow and cache consistency
   - projects: dict of ProjectState, keyed by project_name
 
 Usage
 -----
     from state import state
 
+    # Access context board
+    state.context_board.set("iteration_id", "iter_10")
+    iteration = state.context_board.get("iteration_id")
+
+    # Project management
     ps = state.get_or_create_project("my_proj", "/path/to/data")
     state.set_current_project("my_proj")
-    state.current_project.set_import_result(import_resp)
-    state.current_project.set_cluster_path("/some/cluster/path")
 
-    resolved = state.resolve_cluster_path()
+    # Check file change (auto-reset)
+    state.check_file_change("/new/path/to/data.json")
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
+# Fix import path - remove .conda from sys.path to use system mcp package
+import sys
+sys.path = [p for p in sys.path if '.conda' not in p]
+
+from typing import Any, Optional, Tuple, List
 
 import mcp.types as types
 
 from .project import ProjectState
+from .context import ContextBoard
 from utils.response import error_text
+from utils.logger import logger
 
 
 class SessionState:
-    """Root of the three-level state hierarchy: session → project → module."""
+    """Root of the state hierarchy: session → project → module.
+
+    Now includes ContextBoard for unified parameter flow and cache consistency.
+    """
 
     def __init__(self) -> None:
+        # === Project management ===
         self._projects: dict[str, ProjectState] = {}
-        self._completed_events: set[str] = set()
         self._current_project_name: Optional[str] = None
-        
-        # LLM Playbook execution tracking
-        self._executed_tools: set[str] = set()
-        self._execution_history: list[str] = []
+
+        # === Context Board (NEW) ===
+        self._context_board: ContextBoard = ContextBoard()
+
+        # === Event tracking ===
+        self._completed_events: set[str] = set()
+
+    # === Context Board access ===
+
+    @property
+    def context_board(self) -> ContextBoard:
+        """Access the context board for parameter flow management."""
+        return self._context_board
+
+    # === Project access ===
 
     @property
     def current_project(self) -> Optional[ProjectState]:
@@ -49,47 +74,102 @@ class SessionState:
         if project_name not in self._projects:
             raise ValueError(f"Project '{project_name}' does not exist. Create it first.")
         self._current_project_name = project_name
+        self._context_board.set("project_name", project_name)
 
     def clear_current_project(self) -> None:
         """Unset the current project."""
         self._current_project_name = None
 
-    # -- Playbook execution tracking ---------------------------------------
+    # === Execution history (delegated to ContextBoard) ===
 
-    def mark_tool_executed(self, tool_name: str) -> None:
-        """Mark an internal tool as successfully executed by the LLM."""
-        self._executed_tools.add(tool_name)
-        self._execution_history.append(tool_name)
+    @property
+    def execution_history(self) -> List[str]:
+        """Get valid execution history (excluding invalidated steps)."""
+        return self._context_board.get_valid_execution_history()
 
-    def verify_prerequisites(self, required_tools: list[str]) -> tuple[bool, list[str]]:
+    @property
+    def all_execution_history(self) -> List[str]:
+        """Get all execution history (including invalidated)."""
+        return self._context_board.get_all_execution_history()
+
+    def mark_tool_executed(self, tool_name: str, params: dict = None) -> List[str]:
+        """Mark a tool as executed, return invalidated subsequent steps.
+
+        This method:
+        1. Checks if parameters changed from last execution
+        2. If changed, invalidates subsequent steps
+        3. Records the execution with parameter snapshot
+
+        Args:
+            tool_name: Name of the tool that was executed
+            params: Parameters used for the execution
+
+        Returns:
+            List of tool names that were invalidated (if any)
         """
-        Verify if the required tools have been executed.
+        params = params or {}
+
+        # Check for parameter changes
+        invalidated = []
+        if self._context_board.check_params_changed(tool_name, params):
+            # Parameters changed, invalidate subsequent steps
+            invalidated = self._context_board.invalidate_subsequent_tools(tool_name)
+
+        # Record the execution
+        self._context_board.record_execution(tool_name, params)
+
+        return invalidated
+
+    def verify_prerequisites(self, required_tools: List[str]) -> Tuple[bool, List[str]]:
+        """Verify if prerequisite tools have been executed (only checks valid records).
+
         Returns:
             (is_valid, missing_tools)
         """
         if not required_tools:
             return True, []
-            
-        missing = [t for t in required_tools if t not in self._executed_tools]
+
+        valid_history = self.execution_history
+        missing = [t for t in required_tools if t not in valid_history]
         return len(missing) == 0, missing
 
-    def clear_playbook_state(self) -> None:
-        """Clear the LLM execution history (useful when switching scenarios or restarting)."""
-        self._executed_tools.clear()
-        self._execution_history.clear()
+    # === File change detection ===
 
-    @property
-    def execution_history(self) -> list[str]:
-        return self._execution_history
+    def check_file_change(self, new_file_path: str) -> bool:
+        """Check if file changed and auto-reset context.
 
-    # -- Module shortcuts -------------------------------------------------
+        Args:
+            new_file_path: The new file path being loaded
+
+        Returns:
+            True if file changed and context was reset, False otherwise
+        """
+        old_file = self._context_board.get("file_path")
+
+        if old_file and old_file != new_file_path:
+            logger.info(
+                "Detected analysis file switch: {} → {}",
+                old_file, new_file_path
+            )
+            # Reset context board
+            self._context_board.reset_for_new_file(new_file_path)
+            # Reset project caches
+            for project in self._projects.values():
+                project.reset()
+            # Clear event state
+            self._completed_events.clear()
+            return True
+
+        return False
+
+    # === Module shortcuts ===
 
     def get_module(self, name: str = "timeline") -> Optional[Any]:
         """Get the named module of the current project."""
         cp = self.current_project
         return cp.get_module(name) if cp else None
 
-    # -- Event tracking ---------------------------------------------------
+    # === Event tracking ===
 
     def mark_event_completed(self, event_name: str, payload: dict = None) -> None:
         """Mark an event as completed (e.g. parse-complete from C++ backend).
@@ -122,7 +202,7 @@ class SessionState:
             if ps.cluster_path
         ]
 
-    # -- Project management ---------------------------------------------
+    # === Project management ===
 
     def get_or_create_project(self, project_name: str, file_path: str) -> ProjectState:
         if project_name not in self._projects:
@@ -165,26 +245,31 @@ class SessionState:
                 "No cluster has been parsed yet, or the parameter 'cluster_path' is missing."
             ))
 
+    # === Reset ===
+
     def reset(self) -> None:
+        """Fully reset the session state."""
         self._projects.clear()
         self._completed_events.clear()
         self._current_project_name = None
-        self.clear_playbook_state()
+        self._context_board.reset_full()
+        logger.info("Session state fully reset")
 
     def snapshot(self) -> dict:
         return {
             "current_project": self._current_project_name,
             "projects": {n: p.snapshot() for n, p in self._projects.items()},
-            "executed_tools": list(self._executed_tools),
-            "execution_history": self._execution_history,
+            "context_board": self._context_board.snapshot(),
+            "completed_events": list(self._completed_events),
         }
 
     def __repr__(self) -> str:
         return (
-            f"SessionState(projects={list(self._projects.keys())}, "
-            f"events={list(self._completed_events)}, "
-            f"tools={self._execution_history})"
+            f"SessionState(project={self._current_project_name}, "
+            f"valid_history={self.execution_history}, "
+            f"context_id={self._context_board.context.analysis_id})"
         )
 
 
+# Global singleton (for stdio mode)
 state = SessionState()

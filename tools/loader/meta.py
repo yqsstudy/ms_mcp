@@ -60,3 +60,25 @@ LIST_FILES_META: dict[str, Any] = {
     },
     "success_hints": []
 }
+
+RESET_ANALYSIS_CONTEXT_META: dict[str, Any] = {
+    "name": "reset_analysis_context",
+    "description": (
+        "重置当前分析上下文。当你需要：\n"
+        "1. 开始一个新的分析任务\n"
+        "2. 用户明确要求重新分析\n"
+        "3. 切换到完全不同的分析场景\n"
+        "时调用此工具。这会清理所有缓存数据和执行历史。"
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+    "output_schema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "description": "Reset status."},
+            "previous_file": {"type": "string", "description": "Previous file path that was cleared."},
+        }
+    },
+    "success_hints": [
+        "请调用 import_trace_file 加载新的分析文件。"
+    ]
+}

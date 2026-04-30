@@ -15,6 +15,7 @@ from mapping.timeline import (
 from utils.response import fmt_json, error_text, format_with_hints
 from utils.decorators import internal_tool
 from utils.path_security import validate_path, PathSecurityError
+from utils.logger import logger
 from config import settings
 from state import state
 from .meta import (
@@ -52,6 +53,8 @@ async def query_communication_kernel_detail(
 ) -> list[types.TextContent]:
     """Query kernel-level detail for a communication operator."""
     try:
+        # === 参数自动补全已在 mcp_server.py 中完成 ===
+
         # 校验可选的 file_path 参数
         if file_path:
             try:
@@ -101,6 +104,15 @@ async def query_communication_kernel_detail(
         # Also set current_kernel for fallback compatibility if needed
         timeline_module.set("current_kernel", body)
 
+        # === 注册结果到上下文黑板 ===
+        state.context_board.register_result("query_communication_kernel_detail", body)
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("query_communication_kernel_detail", {
+            "rank_id": rank_id,
+            "operator_name": operator_name,
+        })
+
         summary = {
             "id": body.get("id"),
             "rankId": body.get("rankId"),
@@ -134,6 +146,8 @@ async def get_thread_detail(
 ) -> list[types.TextContent]:
     """Retrieve thread detail data for a specific event/operator in the timeline."""
     try:
+        # === 参数自动补全已在 mcp_server.py 中完成 ===
+
         # 校验可选的 file_path 参数
         if file_path:
             try:
@@ -189,6 +203,15 @@ async def get_thread_detail(
         if duration is not None and kernel:
             kernel["duration"] = duration
 
+        # === 注册结果到上下文黑板 ===
+        state.context_board.register_result("get_thread_detail", body)
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("get_thread_detail", {
+            "kernel_id": kernel_id,
+            "rank_id": rank_id,
+        })
+
         return format_with_hints(body, hints=GET_THREAD_DETAIL_META["success_hints"])
     except Exception as exc:
         return error_text(exc)
@@ -213,6 +236,8 @@ async def get_unit_flows(
 ) -> list[types.TextContent]:
     """Retrieve flow data for a specific operator/event in the timeline."""
     try:
+        # === 参数自动补全已在 mcp_server.py 中完成 ===
+
         # 校验可选的 file_path 参数
         if file_path:
             try:
@@ -256,7 +281,7 @@ async def get_unit_flows(
             return error_text(ValueError(
                 "Missing duration in kernel cache AND end_time is not provided. Call get_thread_detail first."
             ))
-            
+
         if not end_time and duration is not None:
             end_time = int(start_time) + int(duration)
 
@@ -273,6 +298,14 @@ async def get_unit_flows(
             meta_type=meta_type,
             is_simulation=is_simulation,
         )
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("get_unit_flows", {
+            "rank_id": rank_id,
+            "op_id": op_id,
+            "start_time": start_time,
+        })
+
         return format_with_hints(body, hints=GET_UNIT_FLOWS_META["success_hints"])
     except Exception as exc:
         return error_text(exc)
@@ -296,6 +329,8 @@ async def get_units_in_range(
 ) -> list[types.TextContent]:
     """Retrieve list of operators within a selected time range from timeline swimlanes."""
     try:
+        # === 参数自动补全已在 mcp_server.py 中完成 ===
+
         # 校验可选的 file_path 参数
         if file_path:
             try:
@@ -333,6 +368,13 @@ async def get_units_in_range(
             start_depth=start_depth,
             end_depth=end_depth,
         )
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("get_units_in_range", {
+            "rank_id": rank_id,
+            "start_time": start_time,
+            "end_time": end_time,
+        })
 
         if extract_features and isinstance(body, dict) and "data" in body:
             data_list = body.get("data", [])

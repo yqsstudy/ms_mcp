@@ -36,7 +36,8 @@ mcp/
 ├── mapping/
 │   ├── registry.py        # 👉 [核心] 注册中心：内存加载 YAML 并建立拦截约束表
 ├── state/
-│   └── session.py         # 👉 [核心] 状态机：跟踪大模型当前会话的上下文进度，用于强拦截
+│   ├── session.py         # 👉 [核心] 状态机：跟踪大模型当前会话的上下文进度，用于强拦截
+│   └── context.py         # 👉 [核心] 上下文黑板：参数自动补全、变化检测、缓存一致性
 ├── tools/                 # 👉 原子工具层：通过 @internal_tool 注册到底层，不对外暴露
 │   ├── loader/
 │   ├── cluster/
@@ -46,9 +47,13 @@ mcp/
 ├── config.py
 ├── cpp_client.py          # Python <-> C++ WebSocket 桥接客户端
 ├── models.py
+├── tests/                 # 👉 单元测试：pytest 测试框架
+│   ├── test_context_board.py
+│   └── test_path_security.py
 └── utils/                 
     ├── decorators.py      # @internal_tool 和 @require_events 装饰器
-    └── response.py        # 携带 Next-Action Hints 的格式化输出工具
+    ├── response.py        # 携带 Next-Action Hints 的格式化输出工具
+    └── path_security.py   # 👉 路径安全校验：防止路径注入攻击
 ```
 
 ## 3. 核心运行机制
@@ -60,6 +65,25 @@ mcp/
 3. **强制验证**：当 AI 尝试调用 `execute_profiler_tool(tool_name="xxx")` 时，`mcp_server.py` 会询问 `state.verify_prerequisites()`：
    - ❌ 检查到 AI 试图跳过 "加载文件" 直接分析集群，直接断开报错，并在返回文本中严厉告诫大模型遵循依赖要求。
    - ✅ 依赖满组，放行至底层的 `handler.py` 执行，获取数据，最后由 `format_with_hints` 在末尾追加一句引导语启发 AI 下一步动作。
+
+### 3.2 上下文黑板 (Context Board)
+
+上下文黑板提供统一的参数流转与缓存一致性管理：
+
+- **参数自动补全**：下游工具缺失参数时，从黑板自动提取默认值
+- **参数变化检测**：关键参数变化时，自动失效后续步骤缓存
+- **步骤回退检测**：用户回到某一步重新执行时，自动失效后续步骤
+- **文件切换检测**：切换分析文件时，自动重置整个上下文
+
+```python
+# 示例：参数自动补全
+state.context_board.set("iteration_id", "iter_10")
+state.context_board.set("target_operator", "AllReduce")
+
+# 下游工具调用时自动补全
+params = state.context_board.auto_complete_params("query_communication_kernel_detail", {})
+# params = {"rank_id": "rank_3", "operator_name": "AllReduce"}
+```
 
 ## 4. 运行方式（Windows）
 
@@ -237,7 +261,40 @@ $env:MSINSIGHT_LOG_LEVEL="DEBUG"
   - 速率限制
 - 对传入路径/参数做白名单与合法性校验
 
-## 12. 当前实现边界
+### 11.1 路径安全校验
+
+系统已内置路径安全校验机制（`utils/path_security.py`）：
+
+- **路径遍历检测**：禁止 `..` 在路径中出现
+- **相对路径限制**：默认只允许绝对路径
+- **黑名单拦截**：Windows 系统目录、Linux `/etc/`、SSH 密钥等敏感路径
+- **扩展名过滤**：禁止 `.exe`、`.dll`、`.key` 等敏感文件
+- **白名单校验**：只允许访问配置的目录
+
+配置项（`config.py`）：
+```python
+path_security_enabled: bool = True   # 启用/禁用安全校验
+allowed_dirs: List[str] = None       # 自定义允许的目录列表
+allow_relative_paths: bool = False   # 是否允许相对路径
+```
+
+## 12. 测试
+
+项目使用 pytest 进行单元测试：
+
+```powershell
+# 运行所有测试
+python -m pytest tests/ -v
+
+# 运行特定测试文件
+python -m pytest tests/test_context_board.py -v
+```
+
+当前测试覆盖：
+- `test_context_board.py`：Context Board 与 Session State 测试（31 个用例）
+- `test_path_security.py`：路径安全校验测试（20 个用例）
+
+## 13. 当前实现边界
 
 - 目前 SSE 为 HTTP 明文（如需 HTTPS 建议反代）
 - 事件处理主要用于日志，可按业务扩展为状态缓存、通知机制等

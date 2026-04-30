@@ -11,6 +11,7 @@ import mcp.types as types
 from cpp_client import get_client
 from utils.decorators import require_events, internal_tool
 from utils.response import fmt_json, error_text, format_with_hints
+from utils.logger import logger
 from state import state
 from .meta import COMM_DURATION_SLOW_RANK_LIST_META, COMM_DURATION_ITERATIONS_META, COMM_MATRIX_GROUP_META
 
@@ -37,6 +38,9 @@ async def communication_duration_slow_rank_list(
     resolved_path = state.resolve_cluster_path(clusterPath)
     if not isinstance(resolved_path, str):
         return resolved_path
+
+    # === 参数自动补全已在 mcp_server.py 中完成 ===
+
     try:
         params = {
             "operatorName": operatorName,
@@ -56,6 +60,16 @@ async def communication_duration_slow_rank_list(
             "communication",
             params=params,
         )
+
+        # === 注册结果到上下文黑板 ===
+        state.context_board.register_result("communication_duration_slow_rank_list", body)
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("communication_duration_slow_rank_list", {
+            "iteration_id": iterationId,
+            "target_operator_name": targetOperatorName,
+        })
+
         return format_with_hints(body, hints=COMM_DURATION_SLOW_RANK_LIST_META["success_hints"])
     except Exception as exc:
         return error_text(exc)
@@ -88,7 +102,17 @@ async def communication_duration_iterations(
         compare_list = []
         if isinstance(body, dict) and "iterationOrRankId" in body:
             compare_list = body["iterationOrRankId"].get("compare", [])
-        
+
+        # === 注册结果到上下文黑板 ===
+        state.context_board.register_result("communication_duration_iterations", {
+            "iterationList": compare_list
+        })
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("communication_duration_iterations", {
+            "is_compare": isCompare,
+        })
+
         # 返回带有 compare 的顶层对象
         return format_with_hints({"iterationList": compare_list}, hints=COMM_DURATION_ITERATIONS_META["success_hints"])
     except Exception as exc:
@@ -111,6 +135,8 @@ async def communication_matrix_group(
     if not isinstance(resolved_path, str):
         return resolved_path
 
+    # === 参数自动补全已在 mcp_server.py 中完成 ===
+
     try:
         params = {
             "clusterPath": resolved_path,
@@ -127,7 +153,22 @@ async def communication_matrix_group(
             for item in body["data"]:
                 if isinstance(item, dict) and "groupIdHash" in item and isinstance(item["groupIdHash"], dict):
                     item["groupIdHash"] = item["groupIdHash"].get("compare")
-        
+
+        # === 注册结果到上下文黑板 ===
+        state.context_board.set("iteration_id", iterationId)
+        if isinstance(body, dict) and "data" in body and body["data"]:
+            first_group = body["data"][0]
+            if isinstance(first_group, dict):
+                gid = first_group.get("groupIdHash")
+                if gid:
+                    state.context_board.set("group_id_hash", str(gid))
+
+        # === 记录执行历史 ===
+        state.mark_tool_executed("communication_matrix_group", {
+            "iteration_id": iterationId,
+            "group_id_hash": state.context_board.get("group_id_hash"),
+        })
+
         return format_with_hints(body, hints=COMM_MATRIX_GROUP_META["success_hints"])
     except Exception as exc:
         return error_text(exc)

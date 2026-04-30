@@ -43,6 +43,7 @@ import tools  # Import to trigger all @internal_tool decorators
 from mapping.registry import registry
 from utils.decorators import INTERNAL_TOOLS
 from utils.logger import logger
+from utils.param_validation import validate_tool_params
 from state import state
 
 # --------------------------------------------------------------------
@@ -129,36 +130,36 @@ async def call_tool(
     if name == "search_profiler_tools":
         query = arguments.get("query", "")
         logger.info("🔎 Meta-Tool search requested: {}", query)
-            
+
         # 1. 获取剧本的主体 Markdown SOP
         sop_text = registry.search_playbooks(query)
-            
+
         # 2. 动态组装补盲：把该剧本提到的底层工具 Schema 提供给 LLM 看
         attached_schemas = []
         for t_name, internal in INTERNAL_TOOLS.items():
             if f"`{t_name}`" in sop_text or t_name in sop_text:
                 schema_str = json.dumps(internal.get("input_schema", {}), indent=2)
                 attached_schemas.append(f"### 工具: `{t_name}`\n**描述**: {internal.get('description')}\n**参数 Schema**:\n```json\n{schema_str}\n```")
-            
+
         final_text = sop_text
         if attached_schemas:
             final_text += "\n\n## 🛠 本剧本关联的底层工具列表与详细参数要求\n" + "\n\n".join(attached_schemas)
-            
+
         return [types.TextContent(type="text", text=final_text)]
-            
+
     elif name == "execute_profiler_tool":
         tool_name = arguments.get("tool_name")
         tool_args = arguments.get("arguments", {})
         logger.info("🚀 Meta-Tool execute requested: {} args={}", tool_name, tool_args)
-            
+
         if not tool_name or tool_name not in INTERNAL_TOOLS:
             return [types.TextContent(type="text", text=f"⛔️ 错误：未知的内部工具 '{tool_name}'。可能尚未注册。")]
-                
+
         internal = INTERNAL_TOOLS[tool_name]
-            
-        # 0. 全局硬性兜底拦截：任何分析工具执行前，必须至少导入过一次 Trace 文件！
-        # 这个断言跨越了所有 YAML 剧本，是整个 Profiler 系统的物理底线。
-        if tool_name != "import_trace_file" and "import_trace_file" not in state.execution_history:
+
+        # === 0. 全局硬性兜底拦截：任何分析工具执行前，必须至少导入过一次 Trace 文件！ ===
+        valid_history = state.execution_history
+        if tool_name != "import_trace_file" and "import_trace_file" not in valid_history:
             error_msg = (
                 f"⛔️ 全局硬性拦截：未初始化分析目标！\n\n"
                 f"在调用任何分析工具（如 `{tool_name}`）之前，你必须第一步调用 `import_trace_file` "
@@ -169,38 +170,72 @@ async def call_tool(
             logger.warning("Blocked Execution: Global assertion failed. Missing 'import_trace_file'.")
             return [types.TextContent(type="text", text=error_msg)]
 
-        # 1. 剧本防跳步：强拦截断言！
-        requires = registry.get_tool_requirements(tool_name)
-        is_valid, missing = state.verify_prerequisites(requires)
-            
+        # === 1. 参数自动补全（从上下文黑板获取默认值）===
+        completed_args = state.context_board.auto_complete_params(tool_name, tool_args)
+        if completed_args != tool_args:
+            logger.info("参数自动补全: {} → {}", tool_args, completed_args)
+
+        # === 2. Pydantic 参数强校验 ===
+        is_valid, validated_args, validation_error = validate_tool_params(tool_name, completed_args)
         if not is_valid:
+            logger.warning("参数校验拦截: {} - {}", tool_name, validation_error)
+            return [types.TextContent(type="text", text=validation_error)]
+
+        # === 3. 检测参数变化 & 步骤回退 ===
+        invalidated_tools = state.mark_tool_executed(tool_name, validated_args)
+        invalidation_hint = ""
+        if invalidated_tools:
+            invalidation_hint = (
+                f"\n\n⚠️ **注意**：由于参数变化，以下步骤的缓存已失效，需要重新执行:\n"
+                f"- {', '.join(invalidated_tools)}\n"
+            )
+            logger.info("步骤回退检测: 工具 {} 参数变化，失效后续步骤: {}", tool_name, invalidated_tools)
+
+        # === 4. 剧本防跳步：强拦截断言！===
+        requires = registry.get_tool_requirements(tool_name)
+        is_valid_prereq, missing = state.verify_prerequisites(requires)
+
+        if not is_valid_prereq:
             error_msg = (
                 f"⛔️ 执行操作被强行断开拦截！发生严重依赖跳步。\n\n"
                 f"根据当前专家的最佳排查路径要求，在调用 `{tool_name}` 前，"
                 f"需要你先成功获取到 `{missing}` 工具的前置成果与状态。\n"
-                f"当前你在该分析会话里只完成了: {state.execution_history}。\n"
+                f"当前有效执行历史: {state.execution_history}。\n"
                 "👉 请撤回操作，认真重读并遵守 SOP 的 `requires` 约束链路重新执行！"
             )
             logger.warning("Blocked Execution: LLM tried to skip steps. Missing: {}", missing)
             return [types.TextContent(type="text", text=error_msg)]
-            
-        # 2. 放行与映射：直接把大模型组装的字典，解包传入底层 handler 函数
+
+        # === 5. 执行工具 ===
         handler = internal["handler"]
         try:
-            results = await handler(**tool_args)
-                
-            # 3. 如果底层执行成功，把该工具记入"已完成名单"，大模型下一步就不会再被上个拦板拦截了
-            state.mark_tool_executed(tool_name)
-                
+            results = await handler(**validated_args)
+
+            # === 6. 从结果提取关键数据，注册到上下文黑板 ===
+            # 注意：结果提取在各个 handler 中完成，这里只做日志记录
+            logger.debug("Tool {} executed successfully. Context: {}",
+                        tool_name, state.context_board.snapshot())
+
+            # === 7. 如果有失效提示，追加到结果末尾 ===
+            if invalidation_hint and results:
+                # 在最后一个 TextContent 中追加提示
+                for i in range(len(results) - 1, -1, -1):
+                    if isinstance(results[i], types.TextContent):
+                        results[i] = types.TextContent(
+                            type="text",
+                            text=results[i].text + invalidation_hint
+                        )
+                        break
+
             for idx, res in enumerate(results):
                 if isinstance(res, types.TextContent):
                     logger.debug("Tool {} response part {} len: {}", tool_name, idx, len(res.text))
-            
+
             return results
         except Exception as exc:
             logger.exception("Error executing internal tool '{}': {}", tool_name, exc)
             return [types.TextContent(type="text", text=f"内部工具底层执行报错 ({tool_name}): {exc}")]
-        
+
     else:
         return [types.TextContent(type="text", text=f"ERROR: Unknown meta-tool '{name}'.")]
 

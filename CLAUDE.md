@@ -51,6 +51,11 @@ $env:MSINSIGHT_CPP_BACKEND_PORT="9000"
 $env:MSINSIGHT_LOG_LEVEL="DEBUG"
 ```
 
+### Run Tests
+```powershell
+python -m pytest tests/ -v
+```
+
 ## Architecture
 
 ### Meta-Tool Pattern
@@ -63,8 +68,21 @@ Internal tools are registered via `@internal_tool` decorator and are NOT directl
 
 ### State Machine Enforcement
 - `state/session.py` tracks which tools have been executed in the current session
+- `state/context.py` provides Context Board for parameter flow and cache consistency
 - YAML playbooks in `senario/` define `requires` dependencies between steps
 - The gateway blocks execution if prerequisites are not met, returning error messages to guide the LLM
+
+### Context Board
+The Context Board (`state/context.py`) provides unified management of:
+- **Parameter auto-completion**: Downstream tools get default values from the context
+- **Parameter change detection**: Invalidates subsequent step caches when key params change
+- **Step rollback detection**: When user goes back to a previous step, subsequent steps are invalidated
+- **File switch detection**: Automatically resets context when analyzing a different file
+
+Key classes:
+- `AnalysisContext`: Stores current analysis session state variables
+- `ExecutionRecord`: Tracks tool executions with parameter snapshots
+- `ContextBoard`: Unified management interface
 
 ### Key Directories
 
@@ -73,8 +91,8 @@ Internal tools are registered via `@internal_tool` decorator and are NOT directl
 | `senario/` | YAML playbooks defining analysis SOPs with step dependencies |
 | `tools/` | Internal atomic tools using `@internal_tool` decorator |
 | `mapping/` | Registry that loads playbooks and provides tool requirement lookups |
-| `state/` | Session state management for tracking execution history |
-| `utils/` | Decorators (`@internal_tool`, `@require_events`) and response formatting |
+| `state/` | Session state management, Context Board for parameter flow |
+| `utils/` | Decorators (`@internal_tool`, `@require_events`), response formatting, path security, param validation |
 
 ### Adding a New Tool
 
@@ -108,3 +126,21 @@ All settings are in `config.py` and can be overridden via environment variables 
 - `MSINSIGHT_CPP_BACKEND_HOST` / `MSINSIGHT_CPP_BACKEND_PORT`: C++ backend address
 - `MSINSIGHT_CPP_AUTO_START_BINARY`: Path to auto-start the C++ backend
 - `MSINSIGHT_LOG_LEVEL`: "DEBUG" | "INFO" | "WARNING" | "ERROR"
+
+## Security
+
+Path validation is enforced for file operations:
+- Path traversal detection (blocks `..` in paths)
+- System directory blacklist (Windows system dirs, Linux `/etc/`, SSH keys)
+- Sensitive file extension blocking (`.exe`, `.dll`, `.key`, etc.)
+- Whitelist validation for allowed directories
+- Configuration via `config.py`: `path_security_enabled`, `allowed_dirs`
+
+## Parameter Validation
+
+Pydantic-based parameter validation is enforced before tool execution:
+- Unified validation in `execute_profiler_tool` before calling handlers
+- Clear LLM-friendly error messages (missing fields, type errors, constraint violations)
+- Conditional validation (e.g., `baseline_iteration_id` required when `is_compare=true`)
+- Configuration in `utils/param_validation.py`
+- Design document: `docs/pydantic_validation_design.md`

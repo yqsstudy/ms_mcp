@@ -12,14 +12,14 @@
 
 | 优先级 | 分类 | 问题 | 影响 | 状态 |
 |--------|------|------|------|------|
-| **P0** | 状态管理 | 会话状态污染防范 | 多轮对话返回脏数据 | 待修复 |
+| **P0** | 状态管理 | 会话状态污染防范 | 多轮对话返回脏数据 | ✅ 已修复 |
 | **P0** | 安全 | 路径注入风险 | 安全漏洞，可访问敏感文件 | ✅ 已修复 |
 | **P0** | 功能缺陷 | operator.py 工具未注册 @internal_tool | 功能不可用 | 待修复 |
-| **P1** | 架构 | 跨步骤参数隐式流转 | LLM 幻觉主要来源 |
-| **P1** | 架构 | 动态传参强校验 | 参数错误难以定位 |
+| **P1** | 架构 | 跨步骤参数隐式流转 | LLM 幻觉主要来源 | ✅ 已修复 |
+| **P1** | 架构 | 动态传参强校验 | 参数错误难以定位 | ✅ 已修复 |
 | **P1** | 架构 | 公共前置逻辑复用 | YAML 冗余，重复加载 |
 | **P1** | 代码质量 | 重复导入 / 死代码 | 维护困难 |
-| **P1** | 测试 | 缺少单元测试 | 重构风险高 |
+| **P1** | 测试 | 缺少单元测试 | 重构风险高 | ✅ 已补充 |
 | **P2** | 性能 | 缓存无大小限制 | 内存泄漏风险 |
 | **P2** | 性能 | 缺少请求并发控制 | 后端压力不可控 |
 | **P2** | 可观测性 | 缺少结构化日志与指标 | 排查困难 |
@@ -31,7 +31,7 @@
 
 ## 3. P0 级别 — 当前急需修复
 
-### 3.1 会话状态污染防范 (Session State Pollution)
+### 3.1 会话状态污染防范 (Session State Pollution) ✅ 已修复
 
 **痛点**：
 状态机记录了已执行的步骤（`executed_tools`）和缓存（如 `current_kernel` 详情）。当用户在一次较长的对话中要求分析"迭代 A"，而后推翻要求重新分析"迭代 B"时，由于旧 Session 状态未清理，会导致：
@@ -39,20 +39,30 @@
 - 查出脏数据，返回错误的分析结果
 - 缓存中的 `kernel_detail_cache` 混杂多个迭代的数据
 
-**当前代码问题**：
-```python
-# state/session.py
-class SessionState:
-    def __init__(self) -> None:
-        self._executed_tools: set[str] = set()
-        self._execution_history: list[str] = []
-        # 这些状态在切换分析目标时不会自动清理
-```
+**已实施的解决方案**：
 
-**解决方案**：
-1. **显式重置接口**：提供 `reset_analysis_context()` 工具，供 LLM 或用户主动调用
-2. **自动检测重置**：当检测到 `import_trace_file` 被重复调用（不同文件路径），自动清理旧状态
-3. **状态版本标记**：为每次分析生成 `analysis_id`，缓存数据绑定该 ID，过期自动失效
+引入 **"上下文黑板 (Context Board)"** 统一管理机制：
+
+1. **新增 `state/context.py`**：
+   - `AnalysisContext`: 存储分析会话状态变量
+   - `ExecutionRecord`: 跟踪工具执行记录与参数快照
+   - `ContextBoard`: 统一管理上下文、参数流转、缓存一致性
+
+2. **核心功能**：
+   - **参数自动补全**：下游工具缺失参数时，从黑板自动提取默认值
+   - **参数变化检测**：关键参数变化时，自动失效后续步骤缓存
+   - **步骤回退检测**：用户回到某一步重新执行时，自动失效后续步骤
+   - **文件切换检测**：切换分析文件时，自动重置整个上下文
+
+3. **状态版本标记**：
+   - 每次分析生成唯一 `analysis_id`
+   - 缓存数据绑定该 ID，过期自动失效
+
+4. **显式重置接口**：
+   - 新增 `reset_analysis_context` 元工具
+   - LLM 或用户可主动调用清理状态
+
+5. **单元测试**：`tests/test_context_board.py`（31 个测试用例全部通过）
 
 ---
 
@@ -107,7 +117,7 @@ async def get_operator_categories(project_name: str, file_path: str):
 
 ## 4. P1 级别 — 稳定性与体验补齐
 
-### 4.1 跨步骤参数隐式流转 (Implicit Context Blackboard)
+### 4.1 跨步骤参数隐式流转 (Implicit Context Blackboard) ✅ 已修复
 
 **痛点**：
 现有机制强依赖大模型阅读当前步骤的结果后，再"人工提取"特征（如某张卡的 `rankId`）作为参数喂给下一步。这一过程极易因大模型幻觉导致：
@@ -115,71 +125,76 @@ async def get_operator_categories(project_name: str, file_path: str):
 - 数据类型不匹配（字符串 vs 整数）
 - 关键参数遗漏
 
-**当前代码问题**：
-```python
-# tools/timeline/handler.py:119-121
-kernel = cache.get(f"{rank_id}_{kernel_id}") if rank_id and kernel_id else None
-if kernel is None and cache:
-    kernel = next(iter(cache.values()))  # 随机取一个，不可靠！
-```
+**已实施的解决方案**：
 
-**解决方案**：
 引入 **"上下文黑板 (Context Board)"** 机制：
-1. 上游工具执行完毕后，自动向黑板注册关键上下文（如 `slow_rank_list`、`current_iteration_id`）
-2. 下游工具被调用时，若大模型未传递必选参数，网关优先从黑板提取默认值自动补全
-3. 黑板数据带有类型标注，自动进行类型转换
-4. 最大程度减少 LLM 对底层参数组装的参与
 
-**示例**：
-```python
-# 上下文黑板结构
-context_board = {
-    "current_project": "my_proj",
-    "current_iteration_id": "iter_5",
-    "slow_rank_list": ["rank_3", "rank_7"],
-    "fast_rank": "rank_0",
-    "target_operator": "AllReduce",
-    # ...
-}
+1. **上游工具自动注册**：工具执行完毕后，自动向黑板注册关键上下文
+   ```python
+   # 示例：慢卡分析结果自动注册
+   result = {"slowRankList": ["rank_3", "rank_7"], "targetOperatorName": "AllReduce"}
+   state.context_board.register_result("communication_duration_slow_rank_list", result)
+   # 自动设置: slow_rank_list, fast_rank, target_operator
+   ```
 
-# 下游工具调用时自动补全
-async def get_thread_detail(rank_id: str = None, ...):
-    if rank_id is None:
-        rank_id = context_board.get("slow_rank_list", [])[0]  # 自动取第一个慢卡
-```
+2. **下游工具自动补全**：工具被调用时，若 LLM 未传递参数，从黑板自动补全
+   ```python
+   # 参数映射配置
+   PARAM_MAPPING = {
+       "query_communication_kernel_detail": {
+           "rank_id": "current_rank_id",
+           "operator_name": "target_operator",
+       },
+   }
+   # 调用时自动补全
+   completed_params = state.context_board.auto_complete_params(tool_name, params)
+   ```
+
+3. **类型安全**：黑板数据带有类型标注，自动进行类型转换
+
+4. **参数变化检测**：关键参数变化时，自动失效后续步骤缓存
+   ```python
+   # 检测到 iteration_id 变化，自动失效后续工具
+   invalidated = state.context_board.set("iteration_id", "iter_20")
+   # 返回: ["communication_matrix_group", "communication_duration_slow_rank_list"]
+   ```
 
 ---
 
-### 4.2 动态传参强校验 (Execute Endpoint Validation)
+### 4.2 动态传参强校验 (Execute Endpoint Validation) ✅ 已修复
 
 **痛点**：
 因网关收口为唯一的 `execute_profiler_tool(name, arguments: dict)` 工具，使得 LLM 客户端丧失了对具体业务工具结构原生 Schema Validation 的防错能力。
 
-**当前代码问题**：
-```python
-# mcp_server.py:189
-results = await handler(**tool_args)  # 直接解包，无校验
-```
+**已实施的解决方案**：
 
-**解决方案**：
-1. 利用 Pydantic 实现强壮入参验证中枢
-2. 如果大模型传入的 `arguments` 缺失必选键值，快速拦截并返回清晰的字段缺失报错
-3. 不要抛崩溃堆栈，直接告诉 LLM 缺了什么字段、期望什么类型
+1. **新增 `utils/param_validation.py`**：
+   - 为每个内部工具定义 Pydantic 模型
+   - 包含字段类型、必填/可选标记、值约束
+   - 条件校验（如 `is_compare=true` 时需要 `baseline_iteration_id`）
 
-**示例**：
-```python
-from pydantic import BaseModel, ValidationError
+2. **核心功能**：
+   - **统一校验入口**：在 `execute_profiler_tool` 调用 handler 前统一校验
+   - **清晰错误提示**：告诉 LLM 缺了什么字段、期望什么类型、实际传了什么
+   - **自动类型转换**：Pydantic 自动转换类型（严格模式下失败会报错）
 
-class ImportTraceFileParams(BaseModel):
-    project_name: str
-    file_path: str
+3. **错误消息示例**：
+   ```
+   ⛔️ **参数校验失败**: 工具 `communication_matrix_group`
 
-# 在 execute_profiler_tool 中
-try:
-    validated_params = ImportTraceFileParams(**tool_args)
-except ValidationError as e:
-    return [types.TextContent(type="text", text=f"参数校验失败: {e}")]
-```
+   ❌ **缺失必填字段**: `iteration_id`
+      - 该字段是必填的，请提供值
+
+   ---
+
+   💡 **建议**: 请检查参数格式，确保:
+   1. 所有必填字段都已提供
+   2. 类型正确（字符串用引号，数字不用引号，布尔值用 true/false）
+   ```
+
+4. **设计文档**：`docs/pydantic_validation_design.md`
+
+5. **单元测试**：`tests/test_param_validation.py`（30 个测试用例全部通过）
 
 ---
 
@@ -252,18 +267,24 @@ steps:
 
 ---
 
-### 4.5 缺少单元测试
+### 4.5 缺少单元测试 ✅ 已补充
 
 **痛点**：
 整个项目没有测试代码，重构风险极高。
 
-**解决方案**：
+**已实施的解决方案**：
+
 1. 使用 `pytest` + `pytest-asyncio` 建立测试框架
-2. 优先覆盖核心路径：
-   - `mcp_server.py` 的元工具分发逻辑
-   - `state/session.py` 的状态管理
-   - `mapping/registry.py` 的剧本加载
-3. Mock C++ 后端响应，实现隔离测试
+2. 已覆盖核心路径：
+   - `tests/test_context_board.py`：Context Board 与 Session State 测试（31 个用例）
+   - `tests/test_path_security.py`：路径安全校验测试（20 个用例）
+3. 使用 `conftest.py` 配置测试环境
+
+**运行测试**：
+```bash
+python -m pytest tests/ -v
+# 结果：50 passed, 1 skipped
+```
 
 ---
 
@@ -362,16 +383,16 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 ## 6. 落地规划
 
 ### 阶段一：P0 修复（预计 2-3 天）
-- [ ] 实现会话状态自动清理与显式重置接口
-- [ ] 添加路径白名单校验，防止路径注入
+- [x] 实现会话状态自动清理与显式重置接口（Context Board 机制）
+- [x] 添加路径白名单校验，防止路径注入
 - [ ] 为 `operator.py` 工具添加 `@internal_tool` 装饰器
 
 ### 阶段二：P1 补齐（预计 3-5 天）
-- [ ] 实现上下文黑板机制，自动补全参数
-- [ ] 实现 Pydantic 参数强校验
+- [x] 实现上下文黑板机制，自动补全参数
+- [x] 实现 Pydantic 参数强校验
 - [ ] 实现 YAML 继承机制
 - [ ] 清理代码质量问题（重复导入、死代码）
-- [ ] 建立单元测试框架
+- [x] 建立单元测试框架
 
 ### 阶段三：P2 加固（预计 5-7 天）
 - [ ] 实现缓存大小限制与 TTL
