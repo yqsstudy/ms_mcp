@@ -14,11 +14,11 @@
 |--------|------|------|------|------|
 | **P0** | 状态管理 | 会话状态污染防范 | 多轮对话返回脏数据 | ✅ 已修复 |
 | **P0** | 安全 | 路径注入风险 | 安全漏洞，可访问敏感文件 | ✅ 已修复 |
-| **P0** | 功能缺陷 | operator.py 工具未注册 @internal_tool | 功能不可用 | 待修复 |
+| **P0** | 功能缺陷 | operator.py 工具未注册 @internal_tool | 功能不可用 | ✅ 已修复 |
 | **P1** | 架构 | 跨步骤参数隐式流转 | LLM 幻觉主要来源 | ✅ 已修复 |
 | **P1** | 架构 | 动态传参强校验 | 参数错误难以定位 | ✅ 已修复 |
 | **P1** | 架构 | 公共前置逻辑复用 | YAML 冗余，重复加载 | ✅ 已修复 |
-| **P1** | 代码质量 | 重复导入 / 死代码 | 维护困难 |
+| **P1** | 代码质量 | 重复导入 / 死代码 | 维护困难 | ✅ 已清理 |
 | **P1** | 测试 | 缺少单元测试 | 重构风险高 | ✅ 已补充 |
 | **P2** | 性能 | 缓存无大小限制 | 内存泄漏风险 |
 | **P2** | 性能 | 缺少请求并发控制 | 后端压力不可控 |
@@ -96,22 +96,25 @@
 
 ---
 
-### 3.3 operator.py 工具未注册 (Missing Decorators)
+### 3.3 operator.py 工具未注册 (Missing Decorators) ✅ 已修复
 
 **痛点**：
 `tools/operator/operator.py` 中的函数（如 `get_memory_usage`, `get_operator_categories` 等）没有使用 `@internal_tool` 装饰器，导致它们无法被元工具系统调用，功能实际不可用。
 
-**当前代码问题**：
-```python
-# tools/operator/operator.py:45
-async def get_operator_categories(project_name: str, file_path: str):
-    # 没有 @internal_tool 装饰器，不在 INTERNAL_TOOLS 注册表中
-```
+**已实施的解决方案**：
 
-**解决方案**：
-1. 为所有需要暴露的工具添加 `@internal_tool` 装饰器
-2. 补充 `meta.py` 定义工具的 `input_schema` 和 `success_hints`
-3. 在 `tools/__init__.py` 中导入这些 handler 以触发装饰器注册
+1. **为所有工具添加 `@internal_tool` 装饰器**：
+   - Operator 工具：`get_operator_categories`, `get_operator_statistics`, `get_operator_details`
+   - Memory 工具：`get_memory_usage`, `get_memory_operators`, `get_memory_leaks`
+   - Summary 工具：`get_summary_top_data`, `get_summary_statistics`, `get_communication_advisor`
+
+2. **定义工具元数据**：每个工具都有对应的 `*_META` 字典，包含 name、description、input_schema
+
+3. **更新 `tools/__init__.py`**：导入 operator 模块以触发装饰器注册
+
+4. **更新 Pydantic 参数校验**：在 `utils/param_validation.py` 中添加所有新工具的参数模型
+
+5. **清理死代码**：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码
 
 ---
 
@@ -242,7 +245,7 @@ async def get_operator_categories(project_name: str, file_path: str):
 
 ---
 
-### 4.4 代码质量问题修复
+### 4.4 代码质量问题修复 ✅ 已清理
 
 **问题清单**：
 
@@ -261,10 +264,17 @@ async def get_operator_categories(project_name: str, file_path: str):
        return error_text(exc)
    ```
 
-**解决方案**：
-1. 清理重复导入，使用 `flake8` 或 `ruff` 进行静态检查
-2. 删除被注释的死代码，或移到 `archived/` 目录
-3. 区分网络错误、业务错误、参数错误，返回不同的错误提示
+**已实施的清理**：
+
+1. **删除死代码**：
+   - `tools/loader/global_tools.py`：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码（约 100 行）
+   - `tools/operator/operator.py`：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码（约 160 行）
+
+2. **统一使用 `@internal_tool` 装饰器**：所有工具函数都通过装饰器注册，不再需要手动维护 `TOOLS` 和 `DISPATCH` 字典
+
+3. **代码行数变化**：
+   - `global_tools.py`：从 302 行减少到 72 行
+   - `operator.py`：从 483 行减少到 323 行（增加了装饰器和元数据定义）
 
 ---
 
@@ -386,13 +396,13 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 ### 阶段一：P0 修复（预计 2-3 天）
 - [x] 实现会话状态自动清理与显式重置接口（Context Board 机制）
 - [x] 添加路径白名单校验，防止路径注入
-- [ ] 为 `operator.py` 工具添加 `@internal_tool` 装饰器
+- [x] 为 `operator.py` 工具添加 `@internal_tool` 装饰器
 
 ### 阶段二：P1 补齐（预计 3-5 天）
 - [x] 实现上下文黑板机制，自动补全参数
 - [x] 实现 Pydantic 参数强校验
 - [x] 实现 YAML 继承机制
-- [ ] 清理代码质量问题（重复导入、死代码）
+- [x] 清理代码质量问题（重复导入、死代码）
 - [x] 建立单元测试框架
 
 ### 阶段三：P2 加固（预计 5-7 天）

@@ -5,17 +5,11 @@ Exposed MCP tools
 -----------------
 - heartbeat               — keep-alive / connectivity check
 - list_files              — list directory contents on the backend host
-- get_module_config       — available analysis module configuration
-- get_project_explorer    — all project entries known to the backend
-- delete_project_data     — remove specific data paths from a project
-- clear_projects          — clear one or more entire projects
-- check_project_valid     — validate that project data paths still exist
-- rename_project          — rename an existing project
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import mcp.types as types
 
@@ -23,18 +17,15 @@ from cpp_client import get_client
 from utils.errors import CppBackendError, NotConnectedError, RequestTimeoutError, PathSecurityError
 from utils.logger import logger
 from utils.decorators import internal_tool
-from utils.response import fmt_json, error_text, format_with_hints
+from utils.response import error_text, format_with_hints
 from utils.path_security import validate_directory_path
 from config import settings
 from .meta import HEARTBEAT_META, LIST_FILES_META
 
-# --------------------------------------------------------------------
-# Tool implementations
-# --------------------------------------------------------------------
 
 @internal_tool(
-    name=HEARTBEAT_META["name"], 
-    description=HEARTBEAT_META["description"], 
+    name=HEARTBEAT_META["name"],
+    description=HEARTBEAT_META["description"],
     input_schema=HEARTBEAT_META.get("input_schema"),
     output_schema=HEARTBEAT_META.get("output_schema")
 )
@@ -48,6 +39,7 @@ async def heartbeat() -> list[types.TextContent]:
     except (CppBackendError, NotConnectedError, RequestTimeoutError) as exc:
         return error_text(exc)
 
+
 @internal_tool(
     name=LIST_FILES_META["name"],
     description=LIST_FILES_META["description"],
@@ -57,7 +49,6 @@ async def heartbeat() -> list[types.TextContent]:
 async def list_files(path: str) -> list[types.TextContent]:
     """List files and directories at *path* on the backend host."""
     try:
-        # 路径安全校验
         if settings.path_security_enabled:
             try:
                 validated_path = validate_directory_path(
@@ -78,224 +69,3 @@ async def list_files(path: str) -> list[types.TextContent]:
         return format_with_hints(body, hints=LIST_FILES_META["success_hints"])
     except Exception as exc:
         return error_text(exc)
-
-
-async def get_module_config() -> list[types.TextContent]:
-    """Retrieve the list of analysis modules available on the backend."""
-    try:
-        body = await get_client().request("moduleConfig/get", "global")
-        return [types.TextContent(type="text", text=fmt_json(body))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-async def get_project_explorer() -> list[types.TextContent]:
-    """Return all projects currently registered in the backend's project explorer."""
-    try:
-        body = await get_client().request("files/getProjectExplorer", "global")
-        return [types.TextContent(type="text", text=fmt_json(body))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-async def delete_project_data(
-    project_name: str, data_paths: list[str]
-) -> list[types.TextContent]:
-    """Remove specific data paths from a project in the backend.
-
-    Parameters
-    ----------
-    project_name: Name of the target project.
-    data_paths:   List of data path strings to remove.
-    """
-    try:
-        body = await get_client().request(
-            "files/deleteProjectExplorer",
-            "global",
-            params={"projectName": project_name, "dataPath": data_paths},
-        )
-        return [types.TextContent(type="text", text=fmt_json(body or {"status": "deleted"}))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-async def clear_projects(project_names: list[str]) -> list[types.TextContent]:
-    """Clear (reset) one or more entire projects on the backend.
-
-    Parameters
-    ----------
-    project_names: List of project names to clear.
-    """
-    try:
-        body = await get_client().request(
-            "files/clearProjectExplorer",
-            "global",
-            params={"projectNameList": project_names},
-        )
-        return [types.TextContent(type="text", text=fmt_json(body or {"status": "cleared"}))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-async def check_project_valid(
-    project_name: str, data_paths: list[str]
-) -> list[types.TextContent]:
-    """Validate that data paths within a project still exist on disk.
-
-    Parameters
-    ----------
-    project_name: Name of the project to validate.
-    data_paths:   List of data path strings to check.
-    """
-    try:
-        body = await get_client().request(
-            "files/checkProjectValid",
-            "global",
-            params={"projectName": project_name, "dataPath": data_paths},
-        )
-        return [types.TextContent(type="text", text=fmt_json(body))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-async def rename_project(
-    old_project_name: str, new_project_name: str
-) -> list[types.TextContent]:
-    """Rename an existing project in the backend's project explorer.
-
-    Parameters
-    ----------
-    old_project_name: Current name of the project.
-    new_project_name: Desired new name for the project.
-    """
-    try:
-        body = await get_client().request(
-            "files/updateProjectExplorer",
-            "global",
-            params={
-                "oldProjectName": old_project_name,
-                "newProjectName": new_project_name,
-            },
-        )
-        return [types.TextContent(type="text", text=fmt_json(body or {"status": "renamed"}))]
-    except Exception as exc:
-        return error_text(exc)
-
-
-# --------------------------------------------------------------------
-# Tool descriptor registry (consumed by mcp_server.py)
-# --------------------------------------------------------------------
-
-TOOLS: list[types.Tool] = [
-    types.Tool(
-        name="heartbeat",
-        description=(
-            "Check whether the MSInsight C++ profiling backend is reachable "
-            "and responsive. Returns 'OK' on success."
-        ),
-        inputSchema={"type": "object", "properties": {}, "required": []},
-    ),
-    # types.Tool(
-    #     name="list_files",
-    #     description=(
-    #         "List files and sub-directories at the given path on the machine "
-    #         "running the C++ profiling backend."
-    #     ),
-    #     inputSchema={
-    #         "type": "object",
-    #         "properties": {
-    #             "path": {
-    #                 "type": "string",
-    #                 "description": "Absolute directory path on the backend host.",
-    #             }
-    #         },
-    #         "required": ["path"],
-    #     },
-    # ),
-    # types.Tool(
-    #     name="get_module_config",
-    #     description="Retrieve the list of analysis modules available on the backend.",
-    #     inputSchema={"type": "object", "properties": {}, "required": []},
-    # ),
-    # types.Tool(
-    #     name="get_project_explorer",
-    #     description=(
-    #         "Return all projects currently registered in the backend's "
-    #         "project explorer, including their data file paths."
-    #     ),
-    #     inputSchema={"type": "object", "properties": {}, "required": []},
-    # ),
-    # types.Tool(
-    #     name="delete_project_data",
-    #     description="Remove specific data paths from a named project on the backend.",
-    #     inputSchema={
-    #         "type": "object",
-    #         "properties": {
-    #             "project_name": {"type": "string", "description": "Target project name."},
-    #             "data_paths": {
-    #                 "type": "array",
-    #                 "items": {"type": "string"},
-    #                 "description": "List of data path strings to remove.",
-    #             },
-    #         },
-    #         "required": ["project_name", "data_paths"],
-    #     },
-    # ),
-    # types.Tool(
-    #     name="clear_projects",
-    #     description="Clear (reset) one or more entire projects on the backend.",
-    #     inputSchema={
-    #         "type": "object",
-    #         "properties": {
-    #             "project_names": {
-    #                 "type": "array",
-    #                 "items": {"type": "string"},
-    #                 "description": "Names of the projects to clear.",
-    #             }
-    #         },
-    #         "required": ["project_names"],
-    #     },
-    # ),
-    # types.Tool(
-    #     name="check_project_valid",
-    #     description=(
-    #         "Validate that the data paths of a project still exist on disk. "
-    #         "Returns per-path validity information."
-    #     ),
-    #     inputSchema={
-    #         "type": "object",
-    #         "properties": {
-    #             "project_name": {"type": "string"},
-    #             "data_paths": {
-    #                 "type": "array",
-    #                 "items": {"type": "string"},
-    #             },
-    #         },
-    #         "required": ["project_name", "data_paths"],
-    #     },
-    # ),
-    # types.Tool(
-    #     name="rename_project",
-    #     description="Rename an existing project in the backend's project explorer.",
-    #     inputSchema={
-    #         "type": "object",
-    #         "properties": {
-    #             "old_project_name": {"type": "string", "description": "Current project name."},
-    #             "new_project_name": {"type": "string", "description": "New project name."},
-    #         },
-    #         "required": ["old_project_name", "new_project_name"],
-    #     },
-    # ),
-]
-
-# Map tool name → handler function for dispatch in mcp_server.py
-DISPATCH: dict[str, Any] = {
-    "heartbeat": heartbeat,
-    # "list_files": list_files,
-    # "get_module_config": get_module_config,
-    # "get_project_explorer": get_project_explorer,
-    # "delete_project_data": delete_project_data,
-    # "clear_projects": clear_projects,
-    # "check_project_valid": check_project_valid,
-    # "rename_project": rename_project,
-}
