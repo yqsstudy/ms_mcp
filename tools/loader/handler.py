@@ -8,6 +8,8 @@ from mapping.framework import import_trace_file_api
 from state import state
 from utils.response import error_text, format_with_hints
 from utils.decorators import internal_tool
+from utils.path_security import validate_file_path_for_import, PathSecurityError
+from config import settings
 from .meta import IMPORT_TRACE_FILE_META
 
 @internal_tool(
@@ -22,21 +24,36 @@ async def import_trace_file(
 ) -> list[types.TextContent]:
     """Import / load a trace or profile file into the C++ backend."""
     try:
-        body = await import_trace_file_api(project_name, file_path)
-        ps = state.get_or_create_project(project_name, file_path)
+        # 路径安全校验
+        if settings.path_security_enabled:
+            try:
+                validated_path = validate_file_path_for_import(
+                    file_path,
+                    allowed_dirs=settings.allowed_dirs,
+                )
+            except PathSecurityError as e:
+                return error_text(ValueError(
+                    f"路径安全校验失败: {e.message}\n"
+                    f"请确保文件路径在允许的目录范围内。"
+                ))
+        else:
+            validated_path = file_path
+
+        body = await import_trace_file_api(project_name, validated_path)
+        ps = state.get_or_create_project(project_name, validated_path)
         ps.set_import_result(body)
-        
+
         # [调整修复] 必须显式将当前工作的项目游标指向它！
         # 否则后续的 timeline 分析工具中 `cp = state.current_project` 拿到的永远是 None
         state.set_current_project(project_name)
-        
+
         status = "succeeded" if body else "pending"
-        
+
         # Add next-action hints
         conclusion = f"Import {status} for project '{project_name}'."
         return format_with_hints(
-            data={"status": status, "project": project_name}, 
-            hints=IMPORT_TRACE_FILE_META["success_hints"], 
+            data={"status": status, "project": project_name},
+            hints=IMPORT_TRACE_FILE_META["success_hints"],
             conclusion=conclusion
         )
     except Exception as exc:

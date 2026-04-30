@@ -11,7 +11,7 @@ Example .env:
     MSINSIGHT_MCP_PORT=8765
 """
 
-from typing import Literal
+from typing import Literal, Optional, List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -68,6 +68,26 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     log_level: str = Field("INFO", description="Logging level (DEBUG/INFO/WARNING/ERROR)")
     log_file: str = Field("mcp_server.log", description="Path to the rotating log file")
+
+    # ------------------------------------------------------------------
+    # Path security (防止路径注入攻击)
+    # ------------------------------------------------------------------
+    path_security_enabled: bool = Field(
+        True,
+        description="Enable path security validation for file operations"
+    )
+    allowed_dirs: Optional[List[str]] = Field(
+        None,
+        description=(
+            "List of allowed directories for file access. "
+            "If None, uses platform-specific defaults (user home, Documents, etc.). "
+            "Example: ['D:\\data', 'C:\\Users\\admin\\profiling']"
+        )
+    )
+    allow_relative_paths: bool = Field(
+        False,
+        description="Allow relative paths (not recommended for security)"
+    )
 
     # ------------------------------------------------------------------
     # Derived helpers

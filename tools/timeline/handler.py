@@ -14,6 +14,8 @@ from mapping.timeline import (
 )
 from utils.response import fmt_json, error_text, format_with_hints
 from utils.decorators import internal_tool
+from utils.path_security import validate_path, PathSecurityError
+from config import settings
 from state import state
 from .meta import (
     QUERY_COMMUNICATION_KERNEL_DETAIL_META,
@@ -21,6 +23,19 @@ from .meta import (
     GET_UNIT_FLOWS_META,
     GET_UNITS_IN_RANGE_META
 )
+
+
+def _validate_optional_file_path(file_path: Optional[str]) -> Optional[str]:
+    """Validate an optional file path parameter.
+
+    Returns validated path or None if input is None.
+    Raises PathSecurityError if validation fails.
+    """
+    if file_path is None:
+        return None
+    if settings.path_security_enabled:
+        return validate_path(file_path, allowed_dirs=settings.allowed_dirs, must_exist=True)
+    return file_path
 
 
 @internal_tool(
@@ -37,6 +52,13 @@ async def query_communication_kernel_detail(
 ) -> list[types.TextContent]:
     """Query kernel-level detail for a communication operator."""
     try:
+        # 校验可选的 file_path 参数
+        if file_path:
+            try:
+                file_path = _validate_optional_file_path(file_path)
+            except PathSecurityError as e:
+                return error_text(ValueError(f"路径安全校验失败: {e.message}"))
+
         cp = state.current_project
         if cp is None:
             return error_text(ValueError("No current project set. Call state.set_current_project() first."))
@@ -112,6 +134,13 @@ async def get_thread_detail(
 ) -> list[types.TextContent]:
     """Retrieve thread detail data for a specific event/operator in the timeline."""
     try:
+        # 校验可选的 file_path 参数
+        if file_path:
+            try:
+                file_path = _validate_optional_file_path(file_path)
+            except PathSecurityError as e:
+                return error_text(ValueError(f"路径安全校验失败: {e.message}"))
+
         cp = state.current_project
         if cp is None:
             return error_text(ValueError("No current project set. Call state.set_current_project() first."))
@@ -184,6 +213,13 @@ async def get_unit_flows(
 ) -> list[types.TextContent]:
     """Retrieve flow data for a specific operator/event in the timeline."""
     try:
+        # 校验可选的 file_path 参数
+        if file_path:
+            try:
+                file_path = _validate_optional_file_path(file_path)
+            except PathSecurityError as e:
+                return error_text(ValueError(f"路径安全校验失败: {e.message}"))
+
         cp = state.current_project
         if cp is None:
             return error_text(ValueError("No current project set. Call state.set_current_project() first."))
@@ -260,6 +296,13 @@ async def get_units_in_range(
 ) -> list[types.TextContent]:
     """Retrieve list of operators within a selected time range from timeline swimlanes."""
     try:
+        # 校验可选的 file_path 参数
+        if file_path:
+            try:
+                file_path = _validate_optional_file_path(file_path)
+            except PathSecurityError as e:
+                return error_text(ValueError(f"路径安全校验失败: {e.message}"))
+
         cp = state.current_project
         if cp is None:
             return error_text(ValueError("No current project set. Call state.set_current_project() first."))

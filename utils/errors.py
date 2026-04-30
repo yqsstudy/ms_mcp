@@ -44,3 +44,15 @@ class RequestTimeoutError(Exception):
 
 class NotConnectedError(Exception):
     """Raised when the cpp client is used before being initialised."""
+
+
+class PathSecurityError(Exception):
+    """Raised when a path fails security validation.
+
+    This includes attempts to access paths outside allowed directories,
+    path traversal attacks, or access to sensitive system files.
+    """
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
