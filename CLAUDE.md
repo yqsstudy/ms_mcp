@@ -89,8 +89,9 @@ Key classes:
 | Directory | Purpose |
 |-----------|---------|
 | `senario/` | YAML playbooks defining analysis SOPs with step dependencies |
+| `senario/_base/` | Mixin modules for playbook inheritance (init, communication_base) |
 | `tools/` | Internal atomic tools using `@internal_tool` decorator |
-| `mapping/` | Registry that loads playbooks and provides tool requirement lookups |
+| `mapping/` | Registry that loads playbooks, resolves inheritance, provides tool requirement lookups |
 | `state/` | Session state management, Context Board for parameter flow |
 | `utils/` | Decorators (`@internal_tool`, `@require_events`), response formatting, path security, param validation |
 
@@ -100,6 +101,30 @@ Key classes:
 2. Define metadata (name, description, input_schema) in `tools/<category>/meta.py`
 3. Import the handler in `tools/__init__.py` to trigger decorator registration
 4. Optionally add to a playbook in `senario/<scenario>/playbook.yaml` with step dependencies
+
+### Adding a New Playbook
+
+1. Create directory `senario/<scenario>/`
+2. Create `playbook.yaml` with id, name, description, keywords, steps
+3. Use `extends: "base_init"` to inherit common initialization steps
+4. Steps are auto-merged with parent steps; child can override parent steps with same number
+
+**Simplified step format (recommended for linear flows):**
+```yaml
+steps:
+  - tool_name: "some_tool"
+    action: "Description of what this step does"
+  # step number auto-inferred, requires auto-inferred from previous step
+```
+
+**Full step format (for complex dependencies):**
+```yaml
+steps:
+  - step: 2
+    tool_name: "some_tool"
+    action: "Description"
+    requires: ["tool_a", "tool_b"]  # explicit dependencies
+```
 
 ### Communication Flow
 

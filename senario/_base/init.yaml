@@ -1,0 +1,9 @@
+id: "base_init"
+name: "基础初始化模块"
+description: "所有分析剧本的前置初始化步骤，加载 Profiling 文件并初始化分析环境"
+type: "mixin"
+steps:
+  - step: 1
+    tool_name: "import_trace_file"
+    action: "初始化分析环境并加载 Profiling 文件（如果当前还没加载的话）。向用户询问 .json 性能追踪文件的绝对路径。"
+    requires: []

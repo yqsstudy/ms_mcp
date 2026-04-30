@@ -1,0 +1,14 @@
+id: "communication_base"
+name: "通信分析基础模块"
+description: "通信性能分析的前置步骤，包含初始化和迭代选择"
+type: "mixin"
+steps:
+  - step: 1
+    tool_name: "import_trace_file"
+    action: "初始化分析环境并加载 Profiling 文件。"
+    requires: []
+
+  - step: 2
+    tool_name: "communication_duration_iterations"
+    action: "宏观比对各 Iteration 级别的通信耗时，找出异常耗时（尖刺）的某个卡顿迭代。"
+    requires: ["import_trace_file"]

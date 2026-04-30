@@ -17,7 +17,7 @@
 | **P0** | 功能缺陷 | operator.py 工具未注册 @internal_tool | 功能不可用 | 待修复 |
 | **P1** | 架构 | 跨步骤参数隐式流转 | LLM 幻觉主要来源 | ✅ 已修复 |
 | **P1** | 架构 | 动态传参强校验 | 参数错误难以定位 | ✅ 已修复 |
-| **P1** | 架构 | 公共前置逻辑复用 | YAML 冗余，重复加载 |
+| **P1** | 架构 | 公共前置逻辑复用 | YAML 冗余，重复加载 | ✅ 已修复 |
 | **P1** | 代码质量 | 重复导入 / 死代码 | 维护困难 |
 | **P1** | 测试 | 缺少单元测试 | 重构风险高 | ✅ 已补充 |
 | **P2** | 性能 | 缓存无大小限制 | 内存泄漏风险 |
@@ -198,46 +198,47 @@ async def get_operator_categories(project_name: str, file_path: str):
 
 ---
 
-### 4.3 公共前置逻辑复用 (Common Prerequisites Routing)
+### 4.3 公共前置逻辑复用 (Common Prerequisites Routing) ✅ 已修复
 
 **痛点**：
 每一个场景剧本的 Step 1 几乎都需要执行 `import_trace_file`。如果在几十个 YAML 中重复编写，冗余度极高；且当 LLM 切换排查场景时，可能会因为剧本设定而重复请求加载分析文件。
 
-**当前代码已有部分实现**：
-```python
-# mcp_server.py:159-170
-if tool_name != "import_trace_file" and "import_trace_file" not in state.execution_history:
-    # 全局拦截，要求先加载文件
-```
+**已实施的解决方案**：
 
-**缺失部分**：
-- 没有 YAML 继承机制（`extends: "base_init"`）
-- 每个剧本仍需手动写 Step 1
+1. **YAML 继承机制 (Mixins)**：
+   - 新增 `senario/_base/` 目录存放公共 mixin 模块
+   - `init.yaml`：基础初始化模块（Step 1: import_trace_file）
+   - `communication_base.yaml`：通信分析基础模块
 
-**解决方案**：
-1. **基建级全局拦截**（已实现）：在元工具网关入口判断 Session 的文件加载状态
-2. **YAML 继承机制 (Mixins)**：抽象 `base_init.yaml` 等公共基础剧本，业务剧本支持 `extends: "base_init"`
-3. 服务端在解析时自动合并继承链，构建完整 DAG，保持人工配置文件精简
+2. **继承语法**：
+   ```yaml
+   # senario/_base/init.yaml
+   id: "base_init"
+   name: "基础初始化模块"
+   type: "mixin"
+   steps:
+     - step: 1
+       tool_name: "import_trace_file"
+       action: "初始化分析环境"
+       requires: []
 
-**示例**：
-```yaml
-# senario/base_init.yaml
-id: "base_init"
-steps:
-  - step: 1
-    tool_name: "import_trace_file"
-    action: "初始化分析环境"
-    requires: []
+   # senario/fast_slow_rank/playbook.yaml
+   id: "fast_slow_rank"
+   extends: "base_init"  # 继承基础模块
+   steps:
+     - step: 2  # 从 Step 2 开始
+       tool_name: "communication_duration_iterations"
+       ...
+   ```
 
-# senario/fast_slow_rank/playbook.yaml
-extends: "base_init"
-id: "fast_slow_rank"
-name: "快慢节点排查剧本"
-steps:
-  - step: 2  # 从 Step 2 开始，Step 1 由 base_init 提供
-    tool_name: "communication_duration_iterations"
-    ...
-```
+3. **Registry 改造**：
+   - 支持单继承和多继承（`extends: ["mixin1", "mixin2"]`）
+   - 步骤合并与覆盖
+   - Mixin 过滤（不显示在 SOP 目录中）
+
+4. **设计文档**：`docs/playbook_inheritance_design.md`
+
+5. **单元测试**：`tests/test_playbook_inheritance.py`（15 个测试用例全部通过）
 
 ---
 
@@ -390,7 +391,7 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 ### 阶段二：P1 补齐（预计 3-5 天）
 - [x] 实现上下文黑板机制，自动补全参数
 - [x] 实现 Pydantic 参数强校验
-- [ ] 实现 YAML 继承机制
+- [x] 实现 YAML 继承机制
 - [ ] 清理代码质量问题（重复导入、死代码）
 - [x] 建立单元测试框架
 
