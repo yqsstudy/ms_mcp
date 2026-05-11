@@ -27,7 +27,8 @@ from __future__ import annotations
 import sys
 sys.path = [p for p in sys.path if '.conda' not in p]
 
-from typing import Any, Optional, Tuple, List
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple, List, TYPE_CHECKING
 
 import mcp.types as types
 
@@ -36,11 +37,59 @@ from .context import ContextBoard
 from utils.response import error_text
 from utils.logger import logger
 
+if TYPE_CHECKING:
+    from mapping.registry import Playbook, PlaybookRegistry
+
+
+# ============================================================
+# DAG 分支机制数据类
+# ============================================================
+
+@dataclass
+class PlaybookSwitchResult:
+    """剧本切换结果。
+
+    Attributes:
+        success: 是否切换成功
+        new_playbook_id: 新剧本 ID
+        preserved_steps: 保留的共享步骤
+        cleared_steps: 需要清除的步骤
+        next_step: 下一步工具名
+        message: 切换说明
+        error: 错误信息（如果失败）
+    """
+    success: bool
+    new_playbook_id: str
+    preserved_steps: List[str]
+    cleared_steps: List[str]
+    next_step: Optional[str]
+    message: str
+    error: Optional[str] = None
+
+
+@dataclass
+class PlaybookCompletionInfo:
+    """剧本完成信息。
+
+    Attributes:
+        completed: 是否已完成
+        playbook_id: 剧本 ID
+        playbook_name: 剧本名称
+        child_playbooks: 子剧本选项列表
+        message: 完成消息
+    """
+    completed: bool
+    playbook_id: str
+    playbook_name: str
+    child_playbooks: List[dict]
+    message: str
+
 
 class SessionState:
     """Root of the state hierarchy: session → project → module.
 
-    Now includes ContextBoard for unified parameter flow and cache consistency.
+    Now includes ContextBoard for unified parameter flow and cache consistency,
+    and playbook execution state tracking.
     """
 
     def __init__(self) -> None:
@@ -54,12 +103,57 @@ class SessionState:
         # === Event tracking ===
         self._completed_events: set[str] = set()
 
+        # === Playbook execution state ===
+        self._current_playbook_id: Optional[str] = None
+
     # === Context Board access ===
 
     @property
     def context_board(self) -> ContextBoard:
         """Access the context board for parameter flow management."""
         return self._context_board
+
+    # === Playbook execution state ===
+
+    @property
+    def current_playbook_id(self) -> Optional[str]:
+        """Get the current playbook ID."""
+        return self._current_playbook_id
+
+    @property
+    def executed_tools(self) -> List[str]:
+        """Get the list of executed tools (alias for execution_history)."""
+        return self.execution_history
+
+    def set_current_playbook(self, playbook_id: str) -> None:
+        """Set the current playbook and reset execution state.
+
+        Args:
+            playbook_id: The playbook ID to set as current
+        """
+        if self._current_playbook_id != playbook_id:
+            logger.info(
+                "Switching playbook: {} → {}",
+                self._current_playbook_id, playbook_id
+            )
+            self._current_playbook_id = playbook_id
+            # Clear execution history when switching playbooks
+            self._context_board.reset_full()
+
+    def clear_current_playbook(self) -> None:
+        """Clear the current playbook."""
+        self._current_playbook_id = None
+
+    def mark_step_completed(self, tool_name: str) -> None:
+        """Mark a step as completed in the current playbook.
+
+        Args:
+            tool_name: The tool name that was executed
+        """
+        # This is already handled by mark_tool_executed
+        # This method is for explicit marking without parameter tracking
+        if tool_name not in self._context_board.get_all_execution_history():
+            self._context_board.record_execution(tool_name, {})
 
     # === Project access ===
 
@@ -92,7 +186,12 @@ class SessionState:
         """Get all execution history (including invalidated)."""
         return self._context_board.get_all_execution_history()
 
-    def mark_tool_executed(self, tool_name: str, params: dict = None) -> List[str]:
+    def mark_tool_executed(
+        self,
+        tool_name: str,
+        params: dict = None,
+        playbook: 'Playbook' = None
+    ) -> List[str]:
         """Mark a tool as executed, return invalidated subsequent steps.
 
         This method:
@@ -103,6 +202,7 @@ class SessionState:
         Args:
             tool_name: Name of the tool that was executed
             params: Parameters used for the execution
+            playbook: Current playbook for deriving key parameters
 
         Returns:
             List of tool names that were invalidated (if any)
@@ -111,12 +211,12 @@ class SessionState:
 
         # Check for parameter changes
         invalidated = []
-        if self._context_board.check_params_changed(tool_name, params):
+        if self._context_board.check_params_changed(tool_name, params, playbook):
             # Parameters changed, invalidate subsequent steps
-            invalidated = self._context_board.invalidate_subsequent_tools(tool_name)
+            invalidated = self._context_board.invalidate_subsequent_tools(tool_name, playbook)
 
         # Record the execution
-        self._context_board.record_execution(tool_name, params)
+        self._context_board.record_execution(tool_name, params, playbook)
 
         return invalidated
 
@@ -247,17 +347,109 @@ class SessionState:
 
     # === Reset ===
 
+    def switch_playbook(
+        self,
+        target_playbook_id: str,
+        registry: PlaybookRegistry
+    ) -> PlaybookSwitchResult:
+        """切换剧本，自动处理共享步骤。
+
+        Args:
+            target_playbook_id: 目标剧本 ID
+            registry: 剧本注册表
+
+        Returns:
+            切换结果
+        """
+        # 1. 验证目标剧本
+        target = registry.get_playbook(target_playbook_id)
+        if not target:
+            return PlaybookSwitchResult(
+                success=False,
+                new_playbook_id="",
+                preserved_steps=[],
+                cleared_steps=[],
+                next_step=None,
+                message="",
+                error=f"剧本 '{target_playbook_id}' 不存在"
+            )
+
+        # 2. 检查抽象剧本
+        if target.is_abstract:
+            children = registry.get_child_playbooks(target_playbook_id)
+            child_names = [c.id for c in children]
+            return PlaybookSwitchResult(
+                success=False,
+                new_playbook_id="",
+                preserved_steps=[],
+                cleared_steps=[],
+                next_step=None,
+                message="",
+                error=f"'{target_playbook_id}' 是抽象剧本，请选择具体分析方向: {child_names}"
+            )
+
+        # 3. 计算共享步骤
+        source_id = self._current_playbook_id
+        if source_id:
+            shared, cleared = registry.get_shared_steps(source_id, target_playbook_id)
+        else:
+            shared, cleared = set(), set()
+
+        # 4. 更新当前剧本
+        old_playbook = self._current_playbook_id
+        self._current_playbook_id = target_playbook_id
+
+        # 5. 失效非共享步骤
+        if cleared:
+            self._context_board.invalidate_tools(list(cleared))
+            logger.info(
+                "剧本切换: {} → {}, 失效步骤: {}",
+                old_playbook, target_playbook_id, list(cleared)
+            )
+
+        # 6. 获取下一步
+        from state.navigator import StepNavigator
+        navigator = StepNavigator(self)
+        next_step = navigator.get_current_step(target)
+        next_tool = next_step.tool_name if next_step else None
+
+        return PlaybookSwitchResult(
+            success=True,
+            new_playbook_id=target_playbook_id,
+            preserved_steps=list(shared),
+            cleared_steps=list(cleared),
+            next_step=next_tool,
+            message=f"已切换到剧本: {target_playbook_id}"
+        )
+
+    def get_playbook_lineage(self, registry: PlaybookRegistry) -> List[str]:
+        """获取当前剧本的继承链。
+
+        Args:
+            registry: 剧本注册表
+
+        Returns:
+            从根剧本到当前剧本的 ID 列表
+        """
+        if not self._current_playbook_id:
+            return []
+
+        ancestors = registry.get_playbook_ancestors(self._current_playbook_id)
+        return ancestors + [self._current_playbook_id]
+
     def reset(self) -> None:
         """Fully reset the session state."""
         self._projects.clear()
         self._completed_events.clear()
         self._current_project_name = None
+        self._current_playbook_id = None
         self._context_board.reset_full()
         logger.info("Session state fully reset")
 
     def snapshot(self) -> dict:
         return {
             "current_project": self._current_project_name,
+            "current_playbook_id": self._current_playbook_id,
             "projects": {n: p.snapshot() for n, p in self._projects.items()},
             "context_board": self._context_board.snapshot(),
             "completed_events": list(self._completed_events),

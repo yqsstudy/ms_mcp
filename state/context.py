@@ -4,6 +4,12 @@ This module provides the core data structures for:
 1. AnalysisContext - stores current analysis session state variables
 2. ExecutionRecord - tracks individual tool executions with parameter snapshots
 3. ContextBoard - unified management of context, parameter flow, and cache consistency
+
+Playbook-driven design:
+- All configuration is derived from Playbook YAML (no hardcoded configs)
+- Parameter auto-completion from Playbook.context_inputs
+- Result extraction from Playbook.outputs
+- Decision management from Playbook.decision_point
 """
 
 from __future__ import annotations
@@ -11,54 +17,73 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from utils.logger import logger
+
+if TYPE_CHECKING:
+    from mapping.registry import Playbook, PlaybookStep
 
 
 @dataclass
 class AnalysisContext:
     """Analysis context: stores current analysis session state variables.
 
-    These variables are used for:
-    1. Automatic parameter completion for downstream tools
-    2. Parameter change detection → cache invalidation
-    3. Cross-step data flow
+    Uses dynamic storage via _values dict for Playbook-driven variables.
+    Only metadata (analysis_id, file_path, project_name, created_at) are
+    stored as class attributes.
     """
 
-    # === Analysis metadata ===
+    # === Analysis metadata (stored as class attributes) ===
     analysis_id: Optional[str] = None
     file_path: Optional[str] = None
     project_name: Optional[str] = None
     created_at: Optional[datetime] = None
 
-    # === Iteration/Communication analysis context ===
-    iteration_id: Optional[str] = None
-    baseline_iteration_id: Optional[str] = None
-    is_compare: bool = False
+    # === Dynamic storage for Playbook-driven variables ===
+    _values: Dict[str, Any] = field(default_factory=dict)
 
-    # === Communication matrix context ===
-    group_id_hash: Optional[str] = None
-    pg_name: Optional[str] = None
+    # === Candidates storage for decision points ===
+    _candidates: Dict[str, List[Any]] = field(default_factory=dict)
 
-    # === Slow rank analysis context ===
-    slow_rank_list: Optional[List[str]] = None
-    fast_rank: Optional[str] = None
-    target_operator: Optional[str] = None
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a context variable.
 
-    # === Kernel analysis context ===
-    current_kernel_id: Optional[str] = None
-    current_rank_id: Optional[str] = None
-    current_kernel_detail: Optional[Dict[str, Any]] = None
+        Checks class attributes first, then dynamic storage.
+        """
+        # Check class attributes (metadata)
+        if hasattr(self.__class__, key) and not key.startswith('_'):
+            value = getattr(self, key, None)
+            if value is not None:
+                return value
+        # Check dynamic storage
+        return self._values.get(key, default)
 
-    # === Thread analysis context ===
-    current_pid: Optional[str] = None
-    current_tid: Optional[str] = None
-    current_start_time: Optional[int] = None
-    current_depth: Optional[int] = None
+    def set(self, key: str, value: Any) -> None:
+        """Set a context variable.
 
-    # === Time range analysis context ===
-    analysis_time_range: Optional[Dict[str, int]] = None  # {start, end}
+        Metadata stored as class attributes, others in dynamic storage.
+        """
+        if key in ('analysis_id', 'file_path', 'project_name', 'created_at'):
+            setattr(self, key, value)
+        else:
+            self._values[key] = value
+
+    def set_candidates(self, key: str, candidates: List[Any]) -> None:
+        """Store candidates for decision point."""
+        self._candidates[key] = candidates
+
+    def get_candidates(self, key: str) -> Optional[List[Any]]:
+        """Get candidates for decision point."""
+        return self._candidates.get(key)
+
+    def clear_candidates(self, keys: List[str] = None) -> None:
+        """Clear candidates storage."""
+        if keys:
+            for key in keys:
+                self._candidates.pop(key, None)
+        else:
+            self._candidates.clear()
 
     def generate_analysis_id(self, file_path: str) -> str:
         """Generate a unique analysis ID."""
@@ -71,31 +96,13 @@ class AnalysisContext:
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a snapshot of the current context."""
-        return {
+        result = {
             k: v for k, v in self.__dict__.items()
             if not k.startswith('_') and v is not None
         }
-
-    def clear_iteration_context(self) -> None:
-        """Clear iteration-related context (called when switching iterations)."""
-        self.iteration_id = None
-        self.baseline_iteration_id = None
-        self.group_id_hash = None
-        self.pg_name = None
-        self.slow_rank_list = None
-        self.fast_rank = None
-        self.target_operator = None
-
-    def clear_kernel_context(self) -> None:
-        """Clear Kernel-related context."""
-        self.current_kernel_id = None
-        self.current_rank_id = None
-        self.current_kernel_detail = None
-        self.current_pid = None
-        self.current_tid = None
-        self.current_start_time = None
-        self.current_depth = None
-        self.analysis_time_range = None
+        result.update(self._values)
+        result["_candidates"] = dict(self._candidates)
+        return result
 
 
 @dataclass
@@ -107,108 +114,35 @@ class ExecutionRecord:
     key_params: Dict[str, Any] = field(default_factory=dict)
     invalidated: bool = False
     invalidated_at: Optional[datetime] = None
-    invalidated_by: Optional[str] = None  # Which tool's re-execution caused invalidation
+    invalidated_by: Optional[str] = None  # Which decision/tool caused invalidation
 
     def is_valid(self) -> bool:
         """Check if this execution record is still valid."""
         return not self.invalidated
 
-    def invalidate(self, by_tool: str) -> None:
+    def invalidate(self, by_decision: str = None) -> None:
         """Mark this record as invalidated."""
         self.invalidated = True
         self.invalidated_at = datetime.now()
-        self.invalidated_by = by_tool
+        self.invalidated_by = by_decision
 
 
 class ContextBoard:
-    """Context Board: unified management of analysis context, parameter flow, and cache consistency.
+    """Context Board: Playbook-driven pure execution engine.
 
     Core responsibilities:
-    1. Parameter auto-completion: downstream tools get default values from the board
-    2. Parameter change detection: invalidate subsequent step caches when key params change
-    3. Result auto-registration: extract key results from upstream tool execution
+    1. Parameter auto-completion: from Playbook.context_inputs
+    2. Result auto-registration: from Playbook.outputs
+    3. Decision management: from Playbook.decision_point
+    4. Execution record management: track tool execution state
+
+    No hardcoded configurations - all derived from Playbook YAML.
     """
-
-    # === Tool key parameter definitions ===
-    # Defines which parameters are "key parameters" for each tool
-    # (changes to these will cause subsequent cache invalidation)
-    TOOL_KEY_PARAMS: Dict[str, List[str]] = {
-        "import_trace_file": ["file_path", "project_name"],
-        "communication_duration_iterations": ["is_compare"],
-        "communication_matrix_group": ["iteration_id", "group_id_hash"],
-        "communication_duration_slow_rank_list": [
-            "iteration_id", "target_operator_name"
-        ],
-        "query_communication_kernel_detail": [
-            "rank_id", "operator_name"
-        ],
-        "get_thread_detail": ["kernel_id", "rank_id"],
-        "get_unit_flows": ["rank_id", "op_id", "start_time"],
-        "get_units_in_range": ["rank_id", "start_time", "end_time"],
-    }
-
-    # === Parameter dependencies ===
-    # Defines parameter dependencies: if a param changes, which params need clearing
-    PARAM_DEPENDENCIES: Dict[str, List[str]] = {
-        "file_path": ["iteration_id", "slow_rank_list", "current_kernel_detail"],
-        "iteration_id": ["group_id_hash", "slow_rank_list", "current_kernel_detail"],
-        "target_operator": ["current_kernel_detail"],
-        "rank_id": ["current_kernel_detail", "current_tid", "current_pid"],
-    }
-
-    # === Tool execution sequence ===
-    # Defines tool execution order (used to determine "subsequent steps")
-    TOOL_SEQUENCE: Dict[str, int] = {
-        "import_trace_file": 1,
-        "communication_duration_iterations": 2,
-        "communication_matrix_group": 3,
-        "communication_duration_slow_rank_list": 4,
-        "query_communication_kernel_detail": 5,
-        "get_thread_detail": 6,
-        "get_unit_flows": 7,
-        "get_units_in_range": 7,
-    }
-
-    # === Parameter auto-completion mapping ===
-    # Defines which context variables can be used to auto-complete each tool's params
-    PARAM_MAPPING: Dict[str, Dict[str, str]] = {
-        "communication_matrix_group": {
-            "iteration_id": "iteration_id",
-            "is_compare": "is_compare",
-        },
-        "communication_duration_slow_rank_list": {
-            "iteration_id": "iteration_id",
-            "target_operator_name": "target_operator",
-        },
-        "query_communication_kernel_detail": {
-            "rank_id": "current_rank_id",
-            "operator_name": "target_operator",
-        },
-        "get_thread_detail": {
-            "kernel_id": "current_kernel_id",
-            "rank_id": "current_rank_id",
-            "pid": "current_pid",
-            "tid": "current_tid",
-            "start_time": "current_start_time",
-            "depth": "current_depth",
-        },
-        "get_unit_flows": {
-            "rank_id": "current_rank_id",
-            "pid": "current_pid",
-            "tid": "current_tid",
-            "start_time": "current_start_time",
-            "op_id": "current_kernel_id",
-        },
-        "get_units_in_range": {
-            "rank_id": "current_rank_id",
-            "start_time": "current_start_time",
-        },
-    }
 
     def __init__(self):
         self._context = AnalysisContext()
         self._execution_records: Dict[str, ExecutionRecord] = {}
-        self._execution_order: List[str] = []  # Actual execution order
+        self._execution_order: List[str] = []
 
     # === Property access ===
 
@@ -218,61 +152,59 @@ class ContextBoard:
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a context variable."""
-        return getattr(self._context, key, default)
+        return self._context.get(key, default)
 
-    def set(self, key: str, value: Any) -> List[str]:
+    def set(self, key: str, value: Any, playbook: 'Playbook' = None) -> List[str]:
         """Set a context variable, return affected subsequent steps.
 
         If the key parameter being set differs from current value,
         returns the list of tools that need invalidation.
         """
-        old_value = getattr(self._context, key, None)
+        old_value = self._context.get(key)
 
         if old_value is not None and old_value != value:
             # Parameter changed, calculate affected subsequent steps
-            affected_params = self._get_affected_params(key)
-            invalidated_tools = self._get_invalidated_tools(affected_params)
+            invalidated = []
+            if playbook:
+                invalidated = self._invalidate_dependent_steps(key, playbook)
 
-            if invalidated_tools:
+            self._context.set(key, value)
+
+            if invalidated:
                 logger.info(
-                    "Context param changed: {} = {} → {}, invalidating subsequent steps: {}",
-                    key, old_value, value, invalidated_tools
+                    "Context param changed: {} = {} → {}, invalidating: {}",
+                    key, old_value, value, invalidated
                 )
 
-            # Clear affected context variables
-            for param in affected_params:
-                if param != key:  # Don't clear the one we're setting
-                    setattr(self._context, param, None)
+            return invalidated
 
-            # Mark execution records as invalidated
-            self._invalidate_execution_records(invalidated_tools)
-
-            setattr(self._context, key, value)
-            return invalidated_tools
-
-        setattr(self._context, key, value)
+        self._context.set(key, value)
         return []
 
-    def update(self, **kwargs) -> List[str]:
-        """Batch update context variables."""
-        all_invalidated = []
-        for key, value in kwargs.items():
-            if value is not None:
-                invalidated = self.set(key, value)
-                all_invalidated.extend(invalidated)
-        return list(set(all_invalidated))  # Deduplicate
+    # === Playbook-driven methods ===
 
-    # === Parameter auto-completion ===
+    def auto_complete_params(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        playbook: 'Playbook'
+    ) -> Dict[str, Any]:
+        """Auto-complete tool parameters from Playbook.context_inputs.
 
-    def auto_complete_params(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Auto-complete tool parameters.
+        Args:
+            tool_name: Name of the tool to execute
+            params: Provided parameters
+            playbook: Playbook containing context_inputs mapping
 
-        For missing parameters, get default values from the context board.
+        Returns:
+            Completed parameters with values from context board
         """
-        completed = dict(params)
+        step = self._get_step_by_tool(playbook, tool_name)
+        if not step or not step.context_inputs:
+            return params
 
-        mapping = self.PARAM_MAPPING.get(tool_name, {})
-        for param_name, context_key in mapping.items():
+        completed = dict(params)
+        for param_name, context_key in step.context_inputs.items():
             if param_name not in completed or completed[param_name] is None:
                 context_value = self.get(context_key)
                 if context_value is not None:
@@ -284,15 +216,121 @@ class ContextBoard:
 
         return completed
 
+    def register_result(
+        self,
+        tool_name: str,
+        result: Any,
+        playbook: 'Playbook'
+    ) -> None:
+        """Register tool result to context board from Playbook.outputs.
+
+        Args:
+            tool_name: Name of the executed tool
+            result: Tool execution result
+            playbook: Playbook containing outputs definition
+        """
+        if result is None:
+            return
+
+        step = self._get_step_by_tool(playbook, tool_name)
+        if not step or not step.outputs:
+            return
+
+        for output in step.outputs:
+            value = self._extract_by_path(result, output.from_path)
+            if value is not None:
+                if output.type == "candidates":
+                    # Store as candidates for decision point
+                    self._context.set_candidates(output.key, value)
+                    logger.debug(
+                        "Registered candidates: {} = {} items",
+                        output.key, len(value) if isinstance(value, list) else 1
+                    )
+                else:
+                    # Store as deterministic value
+                    self.set(output.key, value, playbook)
+                    logger.debug(
+                        "Registered value: {} = {}",
+                        output.key, value
+                    )
+
+    def register_decision(
+        self,
+        tool_name: str,
+        decisions: Dict[str, Any],
+        playbook: 'Playbook'
+    ) -> List[str]:
+        """Register user decision values, trigger dependency check and rollback.
+
+        Args:
+            tool_name: Name of the tool receiving decision
+            decisions: Dict of {decision_key: selected_value}
+            playbook: Playbook containing decision_point definition
+
+        Returns:
+            List of invalidated tool names
+        """
+        step = self._get_step_by_tool(playbook, tool_name)
+        if not step or not step.decision_point:
+            return []
+
+        all_invalidated = []
+        for key, value in decisions.items():
+            invalidated = self.set(key, value, playbook)
+            all_invalidated.extend(invalidated)
+
+        return list(set(all_invalidated))
+
+    def get_decision_candidates(
+        self,
+        tool_name: str,
+        playbook: 'Playbook'
+    ) -> Optional[Dict[str, Any]]:
+        """Get decision point candidates for user selection.
+
+        Args:
+            tool_name: Name of the tool that has decision point
+            playbook: Playbook containing decision_point definition
+
+        Returns:
+            Dict of {decision_key: {candidates, selection_field, description}}
+            or None if no decision point
+        """
+        step = self._get_step_by_tool(playbook, tool_name)
+        if not step or not step.decision_point:
+            return None
+
+        candidates = {}
+        for sel in step.decision_point.selections:
+            cand_list = self._context.get_candidates(sel.from_candidates)
+            if cand_list:
+                candidates[sel.key] = {
+                    "candidates": cand_list,
+                    "selection_field": sel.selection_field,
+                    "description": step.decision_point.description,
+                }
+
+        return candidates if candidates else None
+
     # === Execution record management ===
 
-    def record_execution(self, tool_name: str, params: Dict[str, Any]) -> None:
-        """Record tool execution with key parameter snapshot."""
+    def record_execution(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        playbook: 'Playbook' = None
+    ) -> None:
+        """Record tool execution with key parameter snapshot.
+
+        Key parameters are derived from Playbook.context_inputs.
+        """
         key_params = {}
-        tool_key_param_names = self.TOOL_KEY_PARAMS.get(tool_name, [])
-        for param_name in tool_key_param_names:
-            if param_name in params and params[param_name] is not None:
-                key_params[param_name] = params[param_name]
+        if playbook:
+            step = self._get_step_by_tool(playbook, tool_name)
+            if step and step.context_inputs:
+                for param_name in step.context_inputs.keys():
+                    if param_name in params and params[param_name] is not None:
+                        key_params[param_name] = params[param_name]
 
         self._execution_records[tool_name] = ExecutionRecord(
             tool_name=tool_name,
@@ -309,14 +347,28 @@ class ContextBoard:
         """Get execution record for a tool."""
         return self._execution_records.get(tool_name)
 
-    def check_params_changed(self, tool_name: str, new_params: Dict[str, Any]) -> bool:
-        """Check if tool parameters differ from last execution."""
+    def check_params_changed(
+        self,
+        tool_name: str,
+        new_params: Dict[str, Any],
+        playbook: 'Playbook' = None
+    ) -> bool:
+        """Check if tool parameters differ from last execution.
+
+        Key parameters are derived from Playbook.context_inputs.
+        """
         record = self.get_execution_record(tool_name)
         if record is None:
             return False  # First execution
 
-        tool_key_param_names = self.TOOL_KEY_PARAMS.get(tool_name, [])
-        for param_name in tool_key_param_names:
+        # Get key parameter names from Playbook
+        key_param_names = []
+        if playbook:
+            step = self._get_step_by_tool(playbook, tool_name)
+            if step and step.context_inputs:
+                key_param_names = list(step.context_inputs.keys())
+
+        for param_name in key_param_names:
             old_value = record.key_params.get(param_name)
             new_value = new_params.get(param_name)
             if old_value != new_value:
@@ -340,53 +392,59 @@ class ContextBoard:
         """Get all execution history (including invalidated)."""
         return list(self._execution_order)
 
-    # === Cache invalidation logic ===
+    # === Rollback logic ===
 
-    def _get_affected_params(self, changed_param: str) -> List[str]:
-        """Get list of affected parameters."""
-        affected = [changed_param]
-        dependencies = self.PARAM_DEPENDENCIES.get(changed_param, [])
-        affected.extend(dependencies)
-        return affected
+    def get_decision_dependencies(
+        self,
+        key: str,
+        playbook: 'Playbook'
+    ) -> List[str]:
+        """Derive decision dependency chain from Playbook.
 
-    def _get_invalidated_tools(self, affected_params: List[str]) -> List[str]:
-        """Calculate which tools need invalidation based on affected params."""
-        invalidated = []
+        Args:
+            key: Decision field name
+            playbook: Playbook to analyze
 
-        for tool_name, record in self._execution_records.items():
-            if not record.is_valid():
-                continue
+        Returns:
+            List of tool names that depend on this decision
+        """
+        affected_steps = []
+        current_step_num = self._get_step_num_by_decision_key(key, playbook)
 
-            # Check if any of the tool's key params are affected
-            tool_key_params = self.TOOL_KEY_PARAMS.get(tool_name, [])
-            for param in tool_key_params:
-                if param in affected_params:
-                    invalidated.append(tool_name)
-                    break
+        for step in playbook.steps:
+            if step.step > current_step_num:
+                if self._step_depends_on_decision(step, key):
+                    affected_steps.append(step.tool_name)
 
-        return invalidated
+        return affected_steps
 
-    def _invalidate_execution_records(self, tool_names: List[str]) -> None:
-        """Mark execution records as invalidated."""
-        for tool_name in tool_names:
-            record = self._execution_records.get(tool_name)
-            if record and record.is_valid():
-                record.invalidate(by_tool="context_change")
-
-    def invalidate_subsequent_tools(self, from_tool: str) -> List[str]:
+    def invalidate_subsequent_tools(
+        self,
+        from_tool: str,
+        playbook: 'Playbook' = None
+    ) -> List[str]:
         """Invalidate all tools executed after the specified tool.
 
         Used when user "goes back" to a previous step and re-executes.
         """
-        from_sequence = self.TOOL_SEQUENCE.get(from_tool, 0)
-        invalidated = []
+        from_step_num = 0
+        if playbook:
+            step = self._get_step_by_tool(playbook, from_tool)
+            if step:
+                from_step_num = step.step
 
+        invalidated = []
         for tool_name in self._execution_order:
-            tool_sequence = self.TOOL_SEQUENCE.get(tool_name, 0)
-            if tool_sequence > from_sequence:
+            tool_step_num = 0
+            if playbook:
+                tool_step = self._get_step_by_tool(playbook, tool_name)
+                if tool_step:
+                    tool_step_num = tool_step.step
+
+            if tool_step_num > from_step_num:
                 record = self._execution_records.get(tool_name)
                 if record and record.is_valid():
-                    record.invalidate(by_tool=from_tool)
+                    record.invalidate(by_decision=from_tool)
                     invalidated.append(tool_name)
 
         if invalidated:
@@ -397,83 +455,128 @@ class ContextBoard:
 
         return invalidated
 
-    # === Result extraction and registration ===
+    def invalidate_tools(self, tool_names: List[str]) -> List[str]:
+        """Invalidate specified tools directly.
 
-    def register_result(self, tool_name: str, result: Any) -> None:
-        """Extract key data from tool result and register to context board."""
+        Used when switching playbooks to clear non-shared steps.
 
-        if result is None:
-            return
+        Args:
+            tool_names: List of tool names to invalidate
 
-        # Handle dict results
-        if isinstance(result, dict):
-            self._register_dict_result(tool_name, result)
-        elif isinstance(result, list) and len(result) > 0:
-            # Handle list results (take first element if dict)
-            if isinstance(result[0], dict):
-                self._register_dict_result(tool_name, result[0])
+        Returns:
+            List of actually invalidated tool names
+        """
+        invalidated = []
+        for tool_name in tool_names:
+            record = self._execution_records.get(tool_name)
+            if record and record.is_valid():
+                record.invalidate(by_decision="playbook_switch")
+                invalidated.append(tool_name)
 
-    def _register_dict_result(self, tool_name: str, result: Dict[str, Any]) -> None:
-        """Register dict result to context board."""
+                # Also clear from execution order
+                if tool_name in self._execution_order:
+                    self._execution_order.remove(tool_name)
 
-        # Define result extractors for each tool
-        if tool_name == "communication_duration_iterations":
-            # Extract iteration list
-            iteration_list = result.get("iterationList", [])
-            if iteration_list and isinstance(iteration_list, list):
-                first_iter = iteration_list[0]
-                if isinstance(first_iter, dict):
-                    iter_id = first_iter.get("id") or first_iter.get("iterationId")
-                    if iter_id:
-                        self.set("iteration_id", str(iter_id))
+        if invalidated:
+            logger.info(
+                "Playbook switch: invalidating non-shared steps: {}",
+                invalidated
+            )
 
-        elif tool_name == "communication_duration_slow_rank_list":
-            # Extract slow rank info
-            slow_ranks = result.get("slowRankList", [])
-            if slow_ranks:
-                self.set("slow_rank_list", [str(r) for r in slow_ranks])
-            fast_rank = result.get("fastRank")
-            if fast_rank:
-                self.set("fast_rank", str(fast_rank))
-            target_op = result.get("targetOperatorName")
-            if target_op:
-                self.set("target_operator", target_op)
+        return invalidated
 
-        elif tool_name == "query_communication_kernel_detail":
-            # Extract kernel detail info
-            kernel_id = result.get("id")
-            if kernel_id:
-                self.set("current_kernel_id", str(kernel_id))
-            rank_id = result.get("rankId")
-            if rank_id:
-                self.set("current_rank_id", str(rank_id))
-            pid = result.get("pid")
-            if pid:
-                self.set("current_pid", str(pid))
-            tid = result.get("threadId")
-            if tid:
-                self.set("current_tid", str(tid))
-            start_time = result.get("startTime")
-            if start_time is not None:
-                self.set("current_start_time", int(start_time))
-            depth = result.get("depth")
-            if depth is not None:
-                self.set("current_depth", int(depth))
-            # Store full kernel detail
-            self.set("current_kernel_detail", result)
+    # === Helper methods ===
 
-        elif tool_name == "get_thread_detail":
-            # Extract duration for time range calculation
-            data = result.get("data", {})
-            duration = data.get("duration")
-            if duration is not None:
-                start_time = self.get("current_start_time")
-                if start_time is not None:
-                    end_time = start_time + int(duration)
-                    self.set("analysis_time_range", {
-                        "start": start_time,
-                        "end": end_time
-                    })
+    def _get_step_by_tool(
+        self,
+        playbook: 'Playbook',
+        tool_name: str
+    ) -> Optional['PlaybookStep']:
+        """Get step definition by tool name."""
+        return playbook.get_step_by_tool(tool_name)
+
+    def _extract_by_path(self, data: Any, path: str) -> Any:
+        """Extract value by JSONPath-like expression.
+
+        Supported formats:
+        - "result.field" → data["field"]
+        - "result.list[0].id" → data["list"][0]["id"]
+        - "params.field" → from parameters
+        """
+        if not path or data is None:
+            return None
+
+        # Remove prefix (result. or params.)
+        parts = path.split('.')
+        if parts[0] in ('result', 'params'):
+            parts = parts[1:]
+
+        current = data
+        for part in parts:
+            if current is None:
+                return None
+
+            # Handle array index
+            if '[' in part and part.endswith(']'):
+                field_name = part.split('[')[0]
+                index = int(part.split('[')[1].rstrip(']'))
+
+                if isinstance(current, dict) and field_name in current:
+                    current = current[field_name]
+                if isinstance(current, list) and 0 <= index < len(current):
+                    current = current[index]
+                else:
+                    return None
+            else:
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                else:
+                    return None
+
+        return current
+
+    def _get_step_num_by_decision_key(
+        self,
+        key: str,
+        playbook: 'Playbook'
+    ) -> int:
+        """Find step number that defines this decision point."""
+        for step in playbook.steps:
+            if step.decision_point:
+                for sel in step.decision_point.selections:
+                    if sel.key == key:
+                        return step.step
+        return 0
+
+    def _step_depends_on_decision(
+        self,
+        step: 'PlaybookStep',
+        key: str
+    ) -> bool:
+        """Check if step depends on a decision field."""
+        if step.context_inputs:
+            if key in step.context_inputs.values():
+                return True
+        return False
+
+    def _invalidate_dependent_steps(
+        self,
+        key: str,
+        playbook: 'Playbook'
+    ) -> List[str]:
+        """Invalidate steps that depend on a decision field."""
+        affected_steps = self.get_decision_dependencies(key, playbook)
+
+        for tool_name in affected_steps:
+            record = self._execution_records.get(tool_name)
+            if record and record.is_valid():
+                record.invalidate(by_decision=key)
+                logger.debug(
+                    "Invalidated step '{}' due to decision change: {}",
+                    tool_name, key
+                )
+
+        return affected_steps
 
     # === Reset ===
 

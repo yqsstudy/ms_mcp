@@ -45,5 +45,13 @@ sys.path = [p for p in sys.path if '.conda' not in p]
 
 from .session import SessionState, state
 from .context import ContextBoard, AnalysisContext, ExecutionRecord
+from .navigator import StepNavigator
 
-__all__ = ["SessionState", "state", "ContextBoard", "AnalysisContext", "ExecutionRecord"]
+__all__ = [
+    "SessionState",
+    "state",
+    "ContextBoard",
+    "AnalysisContext",
+    "ExecutionRecord",
+    "StepNavigator",
+]

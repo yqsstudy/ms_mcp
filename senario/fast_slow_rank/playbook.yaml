@@ -3,21 +3,96 @@ name: "快慢节点排查剧本"
 description: "用于诊断分布式训练中由于某几个慢节点发生异常，导致整体通信卡顿或拖慢整体训练进度的问题。"
 keywords: ["慢节点", "卡顿", "吞吐量低", "拖慢", "通信慢"]
 extends: "base_init"
+
 steps:
-  - tool_name: "communication_duration_iterations"
+  # Step 1: 从 base_init 继承 (import_trace_file)
+  # outputs: file_path, project_name
+
+  - step: 2
+    tool_name: "communication_duration_iterations"
     action: "宏观比对各 Iteration 级别的通信耗时，找出异常耗时（尖刺）的某个卡顿迭代(Iteration)。"
+    requires: ["import_trace_file"]
+    outputs:
+      - key: "iteration_candidates"
+        from_path: "result.iterationList"
+        type: "candidates"
+    decision_point:
+      description: "请选择要分析的迭代（异常耗时的迭代）"
+      selections:
+        - key: "iteration_id"
+          from_candidates: "iteration_candidates"
+          selection_field: "id"
 
-  - tool_name: "communication_matrix_group"
+  - step: 3
+    tool_name: "communication_matrix_group"
     action: "查询特定迭代下的通信矩阵群组，确认具体的通信组合耗时信息。"
+    requires: ["communication_duration_iterations"]
+    context_inputs:
+      iteration_id: "iteration_id"
+      is_compare: "is_compare"
+    outputs:
+      - key: "group_candidates"
+        from_path: "result.data"
+        type: "candidates"
+    decision_point:
+      description: "请选择要分析的通信分组"
+      selections:
+        - key: "group_id_hash"
+          from_candidates: "group_candidates"
+          selection_field: "groupIdHash"
 
-  - tool_name: "communication_duration_slow_rank_list"
+  - step: 4
+    tool_name: "communication_duration_slow_rank_list"
     action: "针对具体的卡顿迭代与通信组，捞取到底是谁（Slow Rank）引发了该轮通信阻塞，同时记录最快完成的卡（Fast Rank）作为对比基准。"
+    requires: ["communication_matrix_group"]
+    context_inputs:
+      iteration_id: "iteration_id"
+      target_operator_name: "target_operator"
+    outputs:
+      - key: "slow_rank_list"
+        from_path: "result.slowRankList"
+      - key: "fast_rank"
+        from_path: "result.fastRank"
+      - key: "target_operator"
+        from_path: "result.targetOperatorName"
 
-  - tool_name: "query_communication_kernel_detail"
+  - step: 5
+    tool_name: "query_communication_kernel_detail"
     action: "以目标通信算子为锚点，分别查询慢卡(Slow Rank)和快卡(Fast Rank)上该算子的 kernel 详情以获取其 startTime、tid 等基础信息，用于后续的对比验证。"
+    requires: ["communication_duration_slow_rank_list"]
+    context_inputs:
+      rank_id: "current_rank_id"
+      operator_name: "target_operator"
+    outputs:
+      - key: "current_kernel_id"
+        from_path: "result.id"
+      - key: "current_rank_id"
+        from_path: "result.rankId"
+      - key: "current_pid"
+        from_path: "result.pid"
+      - key: "current_tid"
+        from_path: "result.threadId"
+      - key: "current_start_time"
+        from_path: "result.startTime"
+      - key: "current_depth"
+        from_path: "result.depth"
 
-  - tool_name: "get_thread_detail"
+  - step: 6
+    tool_name: "get_thread_detail"
     action: "分别获取快慢卡上目标通信算子的线程详情，通过对比 inputShapes、outputShapes 等属性，排查是否因单卡通信量或 Shape 发生变化导致了算子本身耗时的差异（主线1：算子差异分析）。"
+    requires: ["query_communication_kernel_detail"]
+    context_inputs:
+      kernel_id: "current_kernel_id"
+      rank_id: "current_rank_id"
+      pid: "current_pid"
+      tid: "current_tid"
+      start_time: "current_start_time"
+      depth: "current_depth"
 
-  - tool_name: "get_units_in_range"
+  - step: 7
+    tool_name: "get_units_in_range"
     action: "基于快慢卡通信算子的 startTime 向前框选一个合理的时间窗口，在 Host 侧发起范围查询，对比两卡的 Host 侧下发链路（如多余的 launch、同步 API 或计算算子堆积），判断慢卡是否因更晚下发通信算子而拖慢全局（主线2：下发时机差异分析）。"
+    requires: ["get_thread_detail"]
+    context_inputs:
+      rank_id: "current_rank_id"
+      start_time: "current_start_time"

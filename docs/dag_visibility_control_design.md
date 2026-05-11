@@ -10,419 +10,133 @@
 
 2. **信息过载**：LLM 收到大量无关信息（如用户只想排查通信问题，却收到了内存分析、算子统计等全部剧本），增加了幻觉风险。
 
-3. **认知负担**：用户/LLM 需要在大量步骤中找到当前应该执行的操作，容易迷失方向。
+3. **缺乏引导**：当前系统只返回静态 SOP，没有根据当前执行状态动态推荐下一步操作。
 
-4. **缺乏引导**：当前系统只返回静态 SOP，没有根据当前执行状态动态推荐下一步操作。
+### 1.2 目标
 
-### 1.2 现有架构分析
+实现 **"自动推进"机制**：
+
+1. **按需下发**：`search_profiler_tools` 只返回剧本摘要，帮助用户选择
+2. **自动推进**：`execute_profiler_tool` 响应自动追加下一步信息
+3. **状态感知**：跟踪当前剧本和执行进度
+
+---
+
+## 2. 核心设计
+
+### 2.1 设计理念
+
+**简化交互链路**：让 `execute_profiler_tool` 的响应自带下一步信息，减少 `search_profiler_tools` 的调用频率。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    当前架构 (全量下发)                        │
+│                      优化后的交互流程                         │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  search_profiler_tools(query)                               │
-│       │                                                     │
-│       ▼                                                     │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ 返回内容：                                            │   │
-│  │ 1. 所有匹配剧本的完整 SOP（所有步骤）                  │   │
-│  │ 2. 所有关联工具的完整 JSON Schema                     │   │
-│  │ 3. 无状态感知，每次都返回全量信息                      │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  用户: "训练很慢"                                            │
+│  LLM: search_profiler_tools("慢") → 剧本列表                │
 │                                                             │
-│  问题：                                                     │
-│  - 响应体积随剧本数量线性增长                                │
-│  - 包含大量当前不可执行的步骤信息                            │
-│  - LLM 需要自行判断"下一步做什么"                           │
+│  用户: "用快慢节点排查"                                       │
+│  LLM: execute_profiler_tool("import_trace_file", ...)       │
+│       → 结果 + 下一步(步骤2 Schema)                          │
+│                                                             │
+│  LLM: execute_profiler_tool("communication_duration_...")   │
+│       → 结果 + 下一步(步骤3 Schema)                          │
+│                                                             │
+│  ...                                                        │
+│                                                             │
+│  全程只需调用 1 次 search_profiler_tools                     │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.3 目标
+### 2.2 两大核心机制
 
-实现 **"卡视野"机制（State-Aware Delivery）**：
-
-1. **按需下发**：只返回剧本摘要 + 当前可执行步骤的 Schema
-2. **状态感知**：根据 Session State 判断用户当前处于哪个步骤
-3. **动态引导**：在工具响应末尾通过 Hints 推荐下一步操作
-4. **渐进披露**：随着排查深入，逐步展开更详细的工具 Schema
+| 机制 | 职责 | 触发时机 |
+|------|------|----------|
+| **search_profiler_tools** | 剧本选择器 | 用户发起排查/切换剧本 |
+| **execute_profiler_tool** | 执行 + 自动推进 | 每次工具执行后 |
 
 ---
 
-## 2. 核心概念
+## 3. 详细设计
 
-### 2.1 视界等级（Visibility Level）
+### 3.1 search_profiler_tools：剧本选择器
 
-定义不同的信息披露粒度：
+**只做一件事**：返回剧本摘要列表，帮助用户选择。
 
-| 等级 | 名称 | 返回内容 | 适用场景 |
-|------|------|----------|----------|
-| L0 | 摘要级 | 剧本名称、描述、关键词 | 用户刚发起排查，需要选择剧本 |
-| L1 | 步骤概览 | 剧本所有步骤的名称和描述（无 Schema） | 用户选择了剧本，需要了解整体流程 |
-| L2 | 当前步骤 | 当前可执行步骤的详细 Schema | 用户准备执行具体操作 |
-| L3 | 完整详情 | 完整 SOP + 所有工具 Schema | 用户明确要求查看全部信息 |
-
-### 2.2 状态感知（State Awareness）
-
-系统需要感知以下状态：
-
-```python
-class SessionState:
-    # 当前选中的剧本
-    current_playbook_id: Optional[str]
-
-    # 已执行的步骤
-    executed_tools: List[str]
-
-    # 当前步骤索引（在剧本中的位置）
-    current_step_index: int
-
-    # 步骤状态
-    step_status: Dict[str, str]  # "pending" | "completed" | "skipped"
-```
-
-### 2.3 可执行步骤判定
-
-一个步骤"可执行"的条件：
-
-1. **前置条件满足**：`requires` 中的所有工具都已执行
-2. **未被跳过**：该步骤状态不是 "skipped"
-3. **未完成**：该步骤状态不是 "completed"（除非用户要求重新执行）
-
----
-
-## 3. 架构设计
-
-### 3.1 整体架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    DAG 视界控制架构                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  search_profiler_tools(query, visibility_level="auto")     │
-│       │                                                     │
-│       ▼                                                     │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ VisibilityController                                  │   │
-│  │                                                      │   │
-│  │  1. 查询 Session State                               │   │
-│  │  2. 判断当前视界等级                                  │   │
-│  │  3. 过滤/裁剪返回内容                                 │   │
-│  │  4. 注入动态 Hints                                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-│       │                                                     │
-│       ▼                                                     │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ 返回内容（按视界等级）：                               │   │
-│  │                                                      │   │
-│  │ L0: 剧本摘要列表                                     │   │
-│  │ L1: 剧本步骤概览（无 Schema）                         │   │
-│  │ L2: 当前可执行步骤 + 详细 Schema                      │   │
-│  │ L3: 完整 SOP + 所有 Schema                           │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 3.2 核心组件
-
-#### 3.2.1 VisibilityController
-
-```python
-class VisibilityController:
-    """视界控制器：根据会话状态动态裁剪返回内容。"""
-
-    def __init__(self, registry: PlaybookRegistry, state: SessionState):
-        self.registry = registry
-        self.state = state
-
-    def determine_visibility_level(self, query: str) -> VisibilityLevel:
-        """根据查询内容和会话状态判断视界等级。"""
-        # 如果用户明确要求"详细信息"，返回 L3
-        if self._is_detail_request(query):
-            return VisibilityLevel.FULL
-
-        # 如果还没有选中剧本，返回 L0
-        if not self.state.current_playbook_id:
-            return VisibilityLevel.SUMMARY
-
-        # 如果刚选中剧本，返回 L1
-        if not self.state.executed_tools:
-            return VisibilityLevel.OVERVIEW
-
-        # 否则返回 L2（当前步骤）
-        return VisibilityLevel.CURRENT_STEP
-
-    def filter_response(
-        self,
-        playbook: Playbook,
-        level: VisibilityLevel
-    ) -> dict:
-        """根据视界等级过滤返回内容。"""
-        if level == VisibilityLevel.SUMMARY:
-            return self._filter_summary(playbook)
-        elif level == VisibilityLevel.OVERVIEW:
-            return self._filter_overview(playbook)
-        elif level == VisibilityLevel.CURRENT_STEP:
-            return self._filter_current_step(playbook)
-        else:
-            return self._filter_full(playbook)
-
-    def get_executable_steps(self, playbook: Playbook) -> List[PlaybookStep]:
-        """获取当前可执行的步骤列表。"""
-        executable = []
-        for step in playbook.steps:
-            if self._is_step_executable(step):
-                executable.append(step)
-        return executable
-
-    def _is_step_executable(self, step: PlaybookStep) -> bool:
-        """判断步骤是否可执行。"""
-        # 检查前置条件
-        for req in (step.requires or []):
-            if req not in self.state.executed_tools:
-                return False
-        return True
-```
-
-#### 3.2.2 StepNavigator
-
-```python
-class StepNavigator:
-    """步骤导航器：管理剧本执行进度。"""
-
-    def __init__(self, state: SessionState):
-        self.state = state
-
-    def get_current_step(self, playbook: Playbook) -> Optional[PlaybookStep]:
-        """获取当前应该执行的步骤。"""
-        for step in playbook.steps:
-            if self._is_step_executable(step):
-                # 如果步骤未完成，返回该步骤
-                if step.tool_name not in self.state.executed_tools:
-                    return step
-        return None  # 所有步骤已完成
-
-    def get_next_steps(self, playbook: Playbook, count: int = 3) -> List[PlaybookStep]:
-        """获取接下来的 N 个步骤（用于 Hints）。"""
-        executable = []
-        for step in playbook.steps:
-            if len(executable) >= count:
-                break
-            if self._is_step_executable(step):
-                if step.tool_name not in self.state.executed_tools:
-                    executable.append(step)
-        return executable
-
-    def get_progress(self, playbook: Playbook) -> dict:
-        """获取执行进度。"""
-        total = len(playbook.steps)
-        completed = len([s for s in playbook.steps
-                        if s.tool_name in self.state.executed_tools])
-        return {
-            "total": total,
-            "completed": completed,
-            "percentage": round(completed / total * 100, 1) if total > 0 else 0,
-            "current_step": self.get_current_step(playbook),
-        }
-```
-
-#### 3.2.3 DynamicHintsGenerator
-
-```python
-class DynamicHintsGenerator:
-    """动态 Hints 生成器：根据执行状态生成下一步推荐。"""
-
-    def __init__(self, registry: PlaybookRegistry, state: SessionState):
-        self.registry = registry
-        self.state = state
-
-    def generate_hints(self, tool_name: str, result: Any) -> List[str]:
-        """根据工具执行结果生成下一步 Hints。"""
-        hints = []
-
-        # 1. 获取当前剧本
-        playbook = self.registry.get_playbook(self.state.current_playbook_id)
-        if not playbook:
-            return hints
-
-        # 2. 找到下一步骤
-        navigator = StepNavigator(self.state)
-        next_steps = navigator.get_next_steps(playbook, count=2)
-
-        # 3. 生成 Hints
-        for step in next_steps:
-            hint = self._format_hint(step)
-            hints.append(hint)
-
-        # 4. 特殊情况处理
-        if not next_steps:
-            hints.append("✅ 当前剧本所有步骤已完成！你可以：")
-            hints.append("   - 使用 `search_profiler_tools` 选择其他剧本继续排查")
-            hints.append("   - 使用 `reset_analysis_context` 开始新的分析")
-
-        return hints
-
-    def _format_hint(self, step: PlaybookStep) -> str:
-        """格式化单个 Hint。"""
-        tool_meta = INTERNAL_TOOLS.get(step.tool_name, {})
-        tool_desc = tool_meta.get("description", step.action)
-
-        return (
-            f"👉 **下一步**: 调用 `{step.tool_name}`\n"
-            f"   - 目的: {step.action}\n"
-            f"   - 描述: {tool_desc[:100]}..."
-        )
-```
-
----
-
-## 4. 数据结构扩展
-
-### 4.1 SessionState 扩展
-
-```python
-# state/session.py 扩展
-
-class SessionState:
-    # ... 现有字段 ...
-
-    # === 新增：剧本执行状态 ===
-    current_playbook_id: Optional[str] = None
-    step_status: Dict[str, str] = {}  # tool_name -> "pending" | "completed" | "skipped"
-
-    def set_current_playbook(self, playbook_id: str) -> None:
-        """设置当前剧本，重置步骤状态。"""
-        if self.current_playbook_id != playbook_id:
-            self.current_playbook_id = playbook_id
-            self.step_status.clear()
-            self.executed_tools.clear()
-
-    def mark_step_completed(self, tool_name: str) -> None:
-        """标记步骤完成。"""
-        self.step_status[tool_name] = "completed"
-        if tool_name not in self.executed_tools:
-            self.executed_tools.append(tool_name)
-
-    def mark_step_skipped(self, tool_name: str) -> None:
-        """标记步骤跳过。"""
-        self.step_status[tool_name] = "skipped"
-
-    def get_current_step_index(self, playbook: Playbook) -> int:
-        """获取当前步骤索引。"""
-        for i, step in enumerate(playbook.steps):
-            if step.tool_name not in self.executed_tools:
-                return i
-        return len(playbook.steps)  # 全部完成
-```
-
-### 4.2 Playbook 扩展
-
-```python
-# mapping/registry.py 扩展
-
-class PlaybookStep(BaseModel):
-    step: Optional[int] = None
-    tool_name: str
-    action: str
-    requires: Optional[list[str]] = None
-
-    # === 新增字段 ===
-    description: Optional[str] = None  # 详细描述（用于 L2 视界）
-    hints: Optional[list[str]] = None  # 该步骤特有的提示
-    is_optional: bool = False  # 是否可选步骤
-
-
-class Playbook(BaseModel):
-    id: str
-    name: str
-    description: str
-    keywords: list[str] = Field(default_factory=list)
-    steps: list[PlaybookStep]
-    type: Optional[str] = None
-    extends: Optional[Union[str, list[str]]] = None
-
-    # === 新增字段 ===
-    category: Optional[str] = None  # 剧本分类（通信、内存、计算等）
-    estimated_steps: Optional[int] = None  # 预估步骤数
-    prerequisites: Optional[list[str]] = None  # 剧本前置条件
-```
-
----
-
-## 5. API 变更
-
-### 5.1 search_profiler_tools 增强
-
-```python
-# 原有签名
-search_profiler_tools(query: str) -> str
-
-# 增强后签名
-search_profiler_tools(
-    query: str,
-    visibility_level: Optional[str] = "auto",  # "auto" | "summary" | "overview" | "current" | "full"
-    playbook_id: Optional[str] = None,  # 直接指定剧本
-    include_schemas: Optional[bool] = None,  # 是否包含 Schema
-) -> str
-```
-
-### 5.2 返回格式变更
-
-#### L0 - 摘要级（未选择剧本）
+#### 返回格式
 
 ```markdown
 ## 📋 可用排查剧本
 
 | ID | 名称 | 描述 | 关键词 |
 |----|------|------|--------|
-| fast_slow_rank | 快慢节点排查 | 诊断分布式训练中慢节点导致的通信卡顿 | 慢节点, 卡顿, 吞吐量低 |
-| memory_leak | 内存泄漏排查 | 分析训练过程中的内存泄漏问题 | 内存, OOM, 泄漏 |
+| fast_slow_rank | 快慢节点排查 | 诊断分布式训练中慢节点导致的通信卡顿 | 慢节点, 卡顿 |
+| memory_leak | 内存泄漏排查 | 分析训练过程中的内存泄漏问题 | 内存, OOM |
+| operator_analysis | 算子性能分析 | 定位计算瓶颈 | 算子, 性能 |
 
-💡 请告诉我你想排查的问题类型，我会为你推荐合适的剧本。
+💡 请选择一个剧本开始排查，或描述你的问题让我推荐。
 ```
 
-#### L1 - 步骤概览（已选择剧本）
+#### 自动设置当前剧本
 
-```markdown
-## 📖 剧本：快慢节点排查
+当匹配到唯一剧本时，自动设置为当前剧本：
 
-**描述**: 用于诊断分布式训练中由于某几个慢节点发生异常，导致整体通信卡顿或拖慢整体训练进度的问题。
+```python
+# search_profiler_tools 处理逻辑
+matched_playbooks = self._match_playbooks(query)
 
-### 排查步骤概览
-
-| 步骤 | 工具 | 目的 | 状态 |
-|------|------|------|------|
-| 1 | import_trace_file | 初始化分析环境 | ⏳ 待执行 |
-| 2 | communication_duration_iterations | 宏观比对各 Iteration 通信耗时 | ⏳ 待执行 |
-| 3 | communication_matrix_group | 查询特定迭代的通信矩阵 | ⏳ 待执行 |
-| 4 | communication_duration_slow_rank_list | 捞取慢卡和快卡信息 | ⏳ 待执行 |
-| 5 | query_communication_kernel_detail | 查询通信算子 kernel 详情 | ⏳ 待执行 |
-| 6 | get_thread_detail | 获取线程详情对比 | ⏳ 待执行 |
-| 7 | get_units_in_range | Host 侧下发链路分析 | ⏳ 待执行 |
-
-👉 **当前建议**: 从步骤 1 开始，调用 `import_trace_file` 初始化分析环境。
+if len(matched_playbooks) == 1:
+    # 唯一匹配，自动设置
+    state.set_current_playbook(matched_playbooks[0].id)
+    logger.info("自动设置当前剧本: {}", matched_playbooks[0].id)
+elif len(matched_playbooks) > 1:
+    # 多个匹配，返回列表让用户选择
+    pass
 ```
 
-#### L2 - 当前步骤（执行中）
+#### API 签名
+
+```python
+search_profiler_tools(
+    query: str,
+    select_playbook: Optional[str] = None,  # 显式选择剧本
+) -> str
+```
+
+---
+
+### 3.2 execute_profiler_tool：执行 + 自动推进
+
+**核心改动**：执行工具后，自动在响应末尾追加下一步信息。
+
+#### 响应格式
 
 ```markdown
-## 🎯 当前步骤：步骤 3 - 查询通信矩阵
+## 执行结果
 
-**工具**: `communication_matrix_group`
-**目的**: 查询特定迭代下的通信矩阵群组，确认具体的通信组合耗时信息。
+```json
+{
+  "status": "success",
+  "data": {...}
+}
+```
 
-### 参数 Schema
+---
 
+### 🎯 下一步：步骤 2 - communication_duration_iterations
+
+**目的**: 宏观比对各 Iteration 级别的通信耗时
+
+**参数 Schema**:
 ```json
 {
   "type": "object",
   "properties": {
     "iteration_id": {
       "type": "string",
-      "description": "训练迭代 ID（从步骤 2 结果中获取）"
+      "description": "训练迭代 ID"
     },
     "is_compare": {
       "type": "boolean",
@@ -434,105 +148,297 @@ search_profiler_tools(
 }
 ```
 
-### 执行进度
-
-```
-✅ 步骤 1: import_trace_file - 已完成
-✅ 步骤 2: communication_duration_iterations - 已完成
-🎯 步骤 3: communication_matrix_group - 当前步骤
-⏳ 步骤 4: communication_duration_slow_rank_list - 待执行
-⏳ 步骤 5: query_communication_kernel_detail - 待执行
-...
+**进度**: 1/7 (14%)
 ```
 
-💡 **提示**: 使用步骤 2 返回的 `iteration_id` 作为参数。
-```
-
-### 5.3 execute_profiler_tool 增强
-
-在工具执行成功后，自动在响应末尾追加下一步 Hints：
+#### 实现逻辑
 
 ```python
 # mcp_server.py 中的 call_tool 处理
 
-# ... 执行工具 ...
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    if name == "execute_profiler_tool":
+        tool_name = arguments.get("tool_name")
+        tool_args = arguments.get("arguments", {})
 
-# === 新增：生成动态 Hints ===
-hints_generator = DynamicHintsGenerator(registry, state)
-next_hints = hints_generator.generate_hints(tool_name, result)
+        # ... 现有的校验和执行逻辑 ...
 
-if next_hints:
-    hints_text = "\n\n### 💡 推荐的下一步操作\n" + "\n".join(f"- {h}" for h in next_hints)
-    # 追加到最后一个 TextContent
-    results[-1] = types.TextContent(type="text", text=results[-1].text + hints_text)
+        # 执行工具
+        results = await handler(**validated_args)
 
-return results
+        # === 新增：自动追加下一步信息 ===
+        if state.current_playbook_id:
+            next_step_info = _build_next_step_info(tool_name)
+            if next_step_info:
+                # 追加到最后一个 TextContent
+                for i in range(len(results) - 1, -1, -1):
+                    if isinstance(results[i], types.TextContent):
+                        results[i] = types.TextContent(
+                            type="text",
+                            text=results[i].text + next_step_info
+                        )
+                        break
+
+        return results
+
+
+def _build_next_step_info(completed_tool: str) -> Optional[str]:
+    """构建下一步信息。"""
+    playbook = registry.get_playbook(state.current_playbook_id)
+    if not playbook:
+        return None
+
+    navigator = StepNavigator(state)
+
+    # 标记当前步骤完成
+    state.mark_step_completed(completed_tool)
+
+    # 获取下一步
+    next_step = navigator.get_current_step(playbook)
+
+    if not next_step:
+        # 所有步骤已完成
+        return """
+
+---
+
+### ✅ 剧本执行完成
+
+当前剧本所有步骤已完成！你可以：
+- 使用 `search_profiler_tools` 选择其他剧本继续排查
+- 使用 `reset_analysis_context` 开始新的分析
+"""
+
+    # 获取工具 Schema
+    tool_meta = INTERNAL_TOOLS.get(next_step.tool_name, {})
+    schema = tool_meta.get("input_schema", {})
+    progress = navigator.get_progress(playbook)
+
+    return f"""
+
+---
+
+### 🎯 下一步：步骤 {next_step.step} - {next_step.action}
+
+**工具**: `{next_step.tool_name}`
+
+**参数 Schema**:
+```json
+{json.dumps(schema, indent=2, ensure_ascii=False)}
+```
+
+**进度**: {progress['completed']}/{progress['total']} ({progress['percentage']}%)
+"""
+```
+
+---
+
+### 3.3 StepNavigator：步骤导航器
+
+```python
+# state/navigator.py
+
+class StepNavigator:
+    """步骤导航器：管理剧本执行进度。"""
+
+    def __init__(self, state: SessionState):
+        self.state = state
+
+    def get_current_step(self, playbook: Playbook) -> Optional[PlaybookStep]:
+        """获取当前应该执行的步骤（下一个未完成的可执行步骤）。"""
+        for step in playbook.steps:
+            if step.tool_name in self.state.executed_tools:
+                continue  # 已完成
+            if self._is_step_executable(step):
+                return step
+        return None  # 所有步骤已完成
+
+    def _is_step_executable(self, step: PlaybookStep) -> bool:
+        """判断步骤是否可执行（前置条件满足）。"""
+        for req in (step.requires or []):
+            if req not in self.state.executed_tools:
+                return False
+        return True
+
+    def get_progress(self, playbook: Playbook) -> dict:
+        """获取执行进度。"""
+        total = len(playbook.steps)
+        completed = sum(
+            1 for s in playbook.steps
+            if s.tool_name in self.state.executed_tools
+        )
+        return {
+            "total": total,
+            "completed": completed,
+            "percentage": round(completed / total * 100, 1) if total > 0 else 0,
+        }
+```
+
+---
+
+## 4. 数据结构扩展
+
+### 4.1 SessionState 扩展
+
+```python
+# state/session.py
+
+class SessionState:
+    # ... 现有字段 ...
+
+    # === 新增：剧本执行状态 ===
+    current_playbook_id: Optional[str] = None
+
+    def set_current_playbook(self, playbook_id: str) -> None:
+        """设置当前剧本，重置执行状态。"""
+        if self.current_playbook_id != playbook_id:
+            self.current_playbook_id = playbook_id
+            # 切换剧本时清理执行历史
+            self.executed_tools.clear()
+            self.context_board.reset_full()
+            logger.info("切换剧本: {}", playbook_id)
+
+    def mark_step_completed(self, tool_name: str) -> None:
+        """标记步骤完成。"""
+        if tool_name not in self.executed_tools:
+            self.executed_tools.append(tool_name)
+```
+
+---
+
+## 5. 完整交互示例
+
+### 场景：用户排查训练慢问题
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 用户: 训练很慢，帮我排查                                      │
+├─────────────────────────────────────────────────────────────┤
+│ LLM: search_profiler_tools("训练慢")                         │
+│                                                             │
+│ 返回:                                                       │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ 📋 可用排查剧本                                          │ │
+│ │                                                         │ │
+│ │ | ID | 名称 | 描述 |                                    │ │
+│ │ |----|------|------|                                    │ │
+│ │ | fast_slow_rank | 快慢节点排查 | 诊断通信卡顿 |         │ │
+│ │ | operator_analysis | 算子性能分析 | 定位计算瓶颈 |      │ │
+│ │                                                         │ │
+│ │ 💡 请选择一个剧本开始排查                                 │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ 用户: 应该是通信问题，用快慢节点排查                           │
+├─────────────────────────────────────────────────────────────┤
+│ LLM: search_profiler_tools("快慢节点", select_playbook="fast_slow_rank")
+│                                                             │
+│ 系统自动设置: state.current_playbook_id = "fast_slow_rank"  │
+│                                                             │
+│ LLM: execute_profiler_tool("import_trace_file", {...})      │
+│                                                             │
+│ 返回:                                                       │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ ## 执行结果                                              │ │
+│ │ { "status": "success", ... }                            │ │
+│ │                                                         │ │
+│ │ ---                                                     │ │
+│ │                                                         │ │
+│ │ ### 🎯 下一步：步骤 2 - communication_duration_iterations│ │
+│ │                                                         │ │
+│ │ **工具**: communication_duration_iterations              │ │
+│ │                                                         │ │
+│ │ **参数 Schema**:                                        │ │
+│ │ { "iteration_id": {...} }                               │ │
+│ │                                                         │ │
+│ │ **进度**: 1/7 (14%)                                     │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ LLM: execute_profiler_tool("communication_duration_...", {...})
+├─────────────────────────────────────────────────────────────┤
+│ 返回:                                                       │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ ## 执行结果                                              │ │
+│ │ { "iterationList": [...] }                              │ │
+│ │                                                         │ │
+│ │ ---                                                     │ │
+│ │                                                         │ │
+│ │ ### 🎯 下一步：步骤 3 - communication_matrix_group       │ │
+│ │                                                         │ │
+│ │ **工具**: communication_matrix_group                     │ │
+│ │                                                         │ │
+│ │ **参数 Schema**:                                        │ │
+│ │ { "iteration_id": {...}, "is_compare": {...} }          │ │
+│ │                                                         │ │
+│ │ **进度**: 2/7 (28%)                                     │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+... 后续步骤类似，无需再调用 search_profiler_tools ...
+
+┌─────────────────────────────────────────────────────────────┐
+│ 最后一步执行完成后                                            │
+├─────────────────────────────────────────────────────────────┤
+│ 返回:                                                       │
+│ ┌─────────────────────────────────────────────────────────┐ │
+│ │ ## 执行结果                                              │ │
+│ │ { ... }                                                 │ │
+│ │                                                         │ │
+│ │ ---                                                     │ │
+│ │                                                         │ │
+│ │ ### ✅ 剧本执行完成                                      │ │
+│ │                                                         │ │
+│ │ 当前剧本所有步骤已完成！你可以：                           │ │
+│ │ - 使用 search_profiler_tools 选择其他剧本                │ │
+│ │ - 使用 reset_analysis_context 开始新的分析               │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 6. 实现计划
 
-### 6.1 阶段一：基础设施（1-2 天）
+### 阶段一：数据结构扩展（0.5 天）
 
-1. **扩展 SessionState**
-   - 添加 `current_playbook_id`、`step_status` 字段
-   - 实现剧本切换、步骤状态管理方法
+1. 扩展 `SessionState`，添加 `current_playbook_id` 字段
+2. 实现 `set_current_playbook()`、`mark_step_completed()` 方法
 
-2. **扩展 Playbook 数据结构**
-   - 添加 `category`、`prerequisites` 字段
-   - 更新 YAML 解析逻辑
+### 阶段二：StepNavigator 实现（0.5 天）
 
-### 6.2 阶段二：视界控制核心（2-3 天）
+1. 实现 `StepNavigator` 类
+2. 实现 `get_current_step()`、`get_progress()` 方法
 
-1. **实现 VisibilityController**
-   - 视界等级判断逻辑
-   - 响应内容过滤/裁剪
+### 阶段三：API 改造（1 天）
 
-2. **实现 StepNavigator**
-   - 当前步骤获取
-   - 进度计算
+1. 改造 `search_profiler_tools`：简化返回格式，支持自动设置剧本
+2. 改造 `execute_profiler_tool`：自动追加下一步信息
 
-3. **实现 DynamicHintsGenerator**
-   - 下一步推荐生成
-   - 特殊情况处理
+### 阶段四：测试（1 天）
 
-### 6.3 阶段三：API 集成（1-2 天）
+1. 单元测试：StepNavigator、自动推进逻辑
+2. 集成测试：完整交互流程
 
-1. **更新 search_profiler_tools**
-   - 支持 `visibility_level` 参数
-   - 实现分级返回格式
-
-2. **更新 execute_profiler_tool**
-   - 自动追加动态 Hints
-   - 更新步骤状态
-
-### 6.4 阶段四：测试与优化（1-2 天）
-
-1. **单元测试**
-   - VisibilityController 测试
-   - StepNavigator 测试
-   - DynamicHintsGenerator 测试
-
-2. **集成测试**
-   - 端到端流程测试
-   - 边界情况测试
+**总计：3 天**
 
 ---
 
 ## 7. 配置项
 
 ```python
-# config.py 新增配置
+# config.py
 
 class Settings(BaseSettings):
     # ... 现有配置 ...
 
-    # === DAG 视界控制 ===
-    dag_visibility_default: str = "auto"  # 默认视界等级
-    dag_hints_max_count: int = 3  # 最大 Hints 数量
-    dag_show_progress: bool = True  # 是否显示执行进度
-    dag_auto_set_playbook: bool = True  # 是否自动设置当前剧本
+    # === 自动推进 ===
+    auto_progress_enabled: bool = True  # 是否启用自动推进
+    auto_progress_show_schema: bool = True  # 是否在下一步信息中显示 Schema
+    auto_progress_show_progress: bool = True  # 是否显示执行进度
 ```
 
 ---
@@ -541,32 +447,26 @@ class Settings(BaseSettings):
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
-| 视界等级判断错误 | 用户看不到需要的步骤 | 提供 `visibility_level="full"` 强制查看全部 |
-| 剧本切换状态丢失 | 用户需要重新执行 | 提供"保存进度"功能（未来） |
-| Hints 过多干扰用户 | 信息过载 | 限制 Hints 数量，提供配置项 |
-| 向后兼容性 | 现有调用者受影响 | 保持默认行为不变，新参数可选 |
+| 剧本切换时状态丢失 | 用户需要重新执行 | 提示用户切换会清空进度 |
+| 下一步信息过长 | 响应体积增大 | 可配置关闭 Schema 显示 |
+| 循环步骤场景 | 无法自动推进 | 通过 Hints 引导手动遍历 |
 
 ---
 
 ## 9. 未来扩展
 
-### 9.1 剧本嵌套（Sub-Playbooks）
+### 9.1 剧本嵌套
 
-支持大剧本调用小剧本，在 Hints 中引导 Agent 切换剧本：
+支持大剧本调用子剧本：
 
 ```yaml
-# senario/communication_deep_dive/playbook.yaml
-id: "communication_deep_dive"
-name: "通信深度分析"
-type: "sub_playbook"  # 子剧本标记
-parent: "fast_slow_rank"  # 父剧本
-trigger_step: 5  # 在父剧本第 5 步可触发
 steps:
-  - tool_name: "analyze_hccl_log"
-    action: "分析 HCCL 日志"
+  - tool_name: "query_communication_kernel_detail"
+    action: "查询 kernel 详情"
+    sub_playbook: "kernel_deep_dive"  # 可选的子剧本
 ```
 
-### 9.2 循环表达（Loop Expression）
+### 9.2 循环表达
 
 支持批量节点排查：
 
@@ -575,29 +475,23 @@ steps:
   - tool_name: "get_thread_detail"
     action: "获取每张慢卡的线程详情"
     loop_over: "slow_rank_list"  # 遍历上下文中的 slow_rank_list
-    loop_var: "rank_id"  # 循环变量名
-```
-
-### 9.3 智能推荐
-
-基于历史执行记录，推荐最优排查路径：
-
-```python
-def get_recommended_playbook(self, error_pattern: str) -> str:
-    """根据错误模式推荐剧本。"""
-    # 基于历史成功率、执行时间等因素推荐
-    pass
 ```
 
 ---
 
 ## 10. 总结
 
-DAG 视界控制通过以下机制解决 Context 溢出问题：
+本方案通过 **"自动推进"机制** 解决 Context 溢出问题：
 
-1. **分级披露**：根据用户状态返回不同粒度的信息
-2. **状态感知**：跟踪剧本执行进度，只显示可执行步骤
-3. **动态引导**：在工具响应中自动追加下一步推荐
-4. **按需展开**：用户可随时请求完整信息
+| 改动点 | 效果 |
+|--------|------|
+| `search_profiler_tools` 只返回剧本摘要 | 响应体积可控 |
+| `execute_profiler_tool` 自动追加下一步 | 减少交互次数 |
+| 状态感知跟踪执行进度 | LLM 始终知道下一步做什么 |
 
-这套机制在保持系统灵活性的同时，有效控制了 LLM 上下文大小，降低了幻觉风险。
+**核心优势**：
+
+1. **简化交互**：N 步执行只需 1 次 `search_profiler_tools` + N 次 `execute_profiler_tool`
+2. **按需下发**：每次只返回当前需要的 Schema
+3. **渐进引导**：自动推进让 LLM 始终知道下一步做什么
+4. **向后兼容**：保持现有 API 签名，新功能通过响应增强实现

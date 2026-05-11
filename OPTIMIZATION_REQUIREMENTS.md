@@ -24,7 +24,7 @@
 | **P2** | 性能 | 缺少请求并发控制 | 后端压力不可控 |
 | **P2** | 可观测性 | 缺少结构化日志与指标 | 排查困难 |
 | **P2** | 跨平台 | 跨进程自愈机制绑定 Windows | 无法 Linux 部署 |
-| **P2** | 架构 | DAG 视界控制 | 剧本规模化后 Context 溢出 |
+| **P2** | 架构 | DAG 视界控制 | 剧本规模化后 Context 溢出 | ✅ 已修复 |
 | **P2** | 架构 | 剧本循环表达能力 | 批量节点排查遗漏 |
 
 ---
@@ -355,15 +355,34 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 
 ---
 
-### 5.5 DAG 视界控制 (防范剧本规模化后的上下文爆炸)
+### 5.5 DAG 视界控制 (防范剧本规模化后的上下文爆炸) ✅ 已修复
 
 **痛点**：
 若未来的排查树演变成含数十个节点的复杂有向无环图 (DAG)，`search_profiler_tools` 若一次性全量下发整个剧本的 JSON Schema，依然会导致 LLM Context 溢出与幻觉。
 
-**解决方案**：
-1. **卡视野机制 (State-Aware Delivery)**：`search` 接口具备状态感知能力，只返回【剧本摘要】与【当前可用步骤】的 Tool Schema
-2. **击鼓传花 (Hints 接力)**：深度排查阶段，依托 `format_with_hints` 在响应末尾动态拼接【下一步推荐工具的 Schema】
-3. **剧本嵌套与子编排 (Sub-Playbooks)**：支持大剧本调用小剧本，在 Hints 中引导 Agent 切换剧本
+**已实施的解决方案**：
+
+采用 **"自动推进"机制**，简化交互链路：
+
+1. **search_profiler_tools 简化**：只返回剧本摘要列表，帮助用户选择
+2. **execute_profiler_tool 自动推进**：执行工具后，响应自动追加下一步信息（工具名、参数 Schema、进度）
+3. **StepNavigator 步骤导航器**：管理剧本执行进度，判断当前可执行步骤
+
+**核心改动**：
+- `state/navigator.py`：新增 StepNavigator 类
+- `state/session.py`：新增 `current_playbook_id`、`set_current_playbook()` 方法
+- `mapping/registry.py`：简化 `search_playbooks()` 返回格式，新增 `get_playbook_summary()`
+- `mcp_server.py`：改造两个元工具，实现自动推进
+
+**交互流程变化**：
+```
+之前：search → 完整 SOP → execute → search → execute → ...
+现在：search → 剧本列表 → execute → 结果+下一步 Schema → execute → ...
+```
+
+**设计文档**：`docs/dag_visibility_control_design.md`
+
+**单元测试**：`tests/test_navigator.py`（22 个测试用例全部通过）
 
 ---
 
@@ -410,5 +429,6 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 - [ ] 添加请求并发控制
 - [ ] 结构化日志与健康检查端点
 - [ ] 跨平台进程管理抽象
-- [ ] DAG 视界控制与剧本循环表达
+- [x] DAG 视界控制（自动推进机制）
+- [ ] 剧本循环表达能力
 - [ ] SSE/WebSocket 认证机制
