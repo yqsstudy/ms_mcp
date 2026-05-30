@@ -109,6 +109,8 @@ The StepNavigator (`state/navigator.py`) manages playbook execution progress:
 | `senario/` | YAML playbooks defining analysis SOPs with step dependencies |
 | `senario/_base/` | Mixin modules for playbook inheritance (init, communication_base) |
 | `tools/` | Internal atomic tools using `@internal_tool` decorator |
+| `tools/pt_snap/` | Internal wrappers for PyTorch memory snapshot SQLite analysis |
+| `pt_snap/` | Core pt_snap library: focus management, read-only SQLite queries, YAML SQL templates |
 | `mapping/` | Registry that loads playbooks, resolves inheritance, provides tool requirement lookups |
 | `state/` | Session state management, Context Board, StepNavigator |
 | `utils/` | Decorators, response formatting, path security, param validation |
@@ -126,8 +128,9 @@ The StepNavigator (`state/navigator.py`) manages playbook execution progress:
 
 1. Create directory `senario/<scenario>/`
 2. Create `playbook.yaml` with id, name, description, keywords, steps
-3. Use `extends: "base_init"` to inherit common initialization steps
-4. Steps are auto-merged with parent steps; child can override parent steps with same number
+3. Use `extends: "base_init"` for trace/C++ backend workflows that begin with `import_trace_file`
+4. For independent data-source workflows such as `pt_snap_memory_analysis`, start from the domain setup tool and do not extend `base_init`
+5. Steps are auto-merged with parent steps; child can override parent steps with same number
 
 **Simplified step format (recommended for linear flows):**
 ```yaml
@@ -173,10 +176,23 @@ mcp_server.py (gateway with prerequisite validation)
     v
 tools/**/*.py (internal atomic tools)
     |
-    | WebSocket JSON
+    | WebSocket JSON for trace/timeline/cluster tools
     v
 C++ Profiling Backend (profiler_server.exe)
 ```
+
+`pt_snap_*` tools are an exception to the C++ backend path: they analyze PyTorch memory snapshot SQLite databases in-process through the root `pt_snap/` package. These tools do not require `import_trace_file`; they start from `pt_snap_set_focus` and are guided by `senario/pt_snap_memory_analysis/playbook.yaml`.
+
+### pt_snap Memory Snapshot Analysis
+
+Internal tools:
+- `pt_snap_get_focus` - get current process-level snapshot focus
+- `pt_snap_set_focus` - set snapshot SQLite `db_path` and optional `device_id`
+- `pt_snap_list_templates` - list YAML SQL templates by optional category
+- `pt_snap_get_template_info` - inspect template parameters and output schema
+- `pt_snap_execute_query` - execute a template with `params`, optional `device_id`, and bounded `max_rows`
+
+Built-in templates live under `pt_snap/query/templates/` and include `allocation`, `block`, `event`, `callstack_analysis`, `memory_peak`, and `leak_detection`.
 
 ## Configuration
 
@@ -234,6 +250,7 @@ Configuration in `mapping/dag.py` and `mapping/registry.py`.
 - `docs/playbook_dag_branch_architecture.md` - DAG branching architecture
 - `docs/playbook_dag_branch_interface.md` - DAG branching interface spec
 - `docs/playbook_dag_branch_workflow.md` - DAG branching implementation workflow
+- `docs/pt_snap_memory_analysis.md` - PyTorch memory snapshot analysis guide
 
 ## Tests
 
@@ -241,11 +258,16 @@ Configuration in `mapping/dag.py` and `mapping/registry.py`.
 python -m pytest tests/ -v
 ```
 
-Current test coverage (174 tests):
-- `test_context_board.py` - Context Board and Session State (37 tests)
-- `test_path_security.py` - Path security validation (20 tests)
-- `test_param_validation.py` - Pydantic parameter validation (30 tests)
-- `test_playbook_inheritance.py` - Playbook inheritance and mixin (19 tests)
-- `test_playbook_parsing.py` - Playbook parsing with new fields (20 tests)
-- `test_navigator.py` - StepNavigator and auto-progress (22 tests)
-- `test_dag_branch.py` - DAG branching mechanism (27 tests)
+Current test status: `188 passed, 1 skipped`.
+
+Key coverage:
+- `test_context_board.py` - Context Board and Session State
+- `test_path_security.py` - Path security validation
+- `test_param_validation.py` - Pydantic parameter validation, including pt_snap models
+- `test_playbook_inheritance.py` - Playbook inheritance and mixin
+- `test_playbook_parsing.py` - Playbook parsing with new fields
+- `test_navigator.py` - StepNavigator and auto-progress
+- `test_dag_branch.py` - DAG branching mechanism
+- `test_pt_snap_registration.py` - pt_snap internal tool registration
+- `test_pt_snap_core.py` - pt_snap SQLite query smoke tests
+- `test_pt_snap_handler.py` - pt_snap handler behavior

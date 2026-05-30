@@ -1,7 +1,7 @@
 import functools
 from typing import Callable, Any, Dict
 import mcp.types as types
-from state import state
+from state import get_current_state
 
 # 全局内部工具注册表
 # 格式: { "tool_name": { "name": ..., "description": ..., "schema": ..., "handler": <func> } }
@@ -38,7 +38,8 @@ def require_events(*event_names):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             # 检查缺失的事件
-            missing = [evt for evt in event_names if not state.is_completed(evt)]
+            current_state = get_current_state()
+            missing = [evt for evt in event_names if not current_state.is_completed(evt)]
             if missing:
                 missing_str = ", ".join(missing)
                 # 直接返回标准的 MCP 文本响应，明确告知大模型（LLM）当前状态

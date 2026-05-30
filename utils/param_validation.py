@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional, Type, Union
 from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
 import mcp.types as types
@@ -130,6 +131,63 @@ class GetUnitsInRangeParams(BaseModel):
     extract_features: Optional[bool] = Field(True, description="If true, extracts summary features instead of returning raw list")
 
 
+class PtSnapGetFocusParams(BaseModel):
+    """Parameters for pt_snap_get_focus tool."""
+    pass
+
+
+class PtSnapSetFocusParams(BaseModel):
+    """Parameters for pt_snap_set_focus tool."""
+    db_path: str = Field(..., min_length=1, description="Absolute path to the pt_snap SQLite database")
+    device_id: Optional[int] = Field(None, ge=0, description="Optional device ID")
+
+    @field_validator('db_path')
+    @classmethod
+    def validate_db_path(cls, v: str) -> str:
+        value = v.strip()
+        if not value:
+            raise ValueError("db_path cannot be empty")
+        if not os.path.isabs(value) and not value.startswith('/'):
+            raise ValueError("db_path must be an absolute path")
+        return value
+
+
+class PtSnapListTemplatesParams(BaseModel):
+    """Parameters for pt_snap_list_templates tool."""
+    category: Optional[str] = Field(None, description="Optional template category")
+
+    @field_validator('category')
+    @classmethod
+    def validate_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        value = v.strip()
+        allowed = {"basic", "statistical", "business"}
+        if value not in allowed:
+            raise ValueError(f"category must be one of {sorted(allowed)}")
+        return value
+
+
+class PtSnapGetTemplateInfoParams(BaseModel):
+    """Parameters for pt_snap_get_template_info tool."""
+    name: str = Field(..., min_length=1, description="Template name")
+
+
+class PtSnapExecuteQueryParams(BaseModel):
+    """Parameters for pt_snap_execute_query tool."""
+    template: str = Field(..., min_length=1, description="Template name")
+    params: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Template parameters")
+    device_id: Optional[int] = Field(None, ge=0, description="Optional device ID")
+    max_rows: Optional[int] = Field(1000, ge=1, le=10000, description="Maximum returned rows")
+
+    @field_validator('max_rows', mode='before')
+    @classmethod
+    def reject_bool_max_rows(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("max_rows must be an integer, not boolean")
+        return v
+
+
 class HeartbeatParams(BaseModel):
     """Parameters for heartbeat tool - no required params."""
     pass
@@ -158,6 +216,11 @@ TOOL_PARAM_MODELS: Dict[str, Type[BaseModel]] = {
     "get_thread_detail": GetThreadDetailParams,
     "get_unit_flows": GetUnitFlowsParams,
     "get_units_in_range": GetUnitsInRangeParams,
+    "pt_snap_get_focus": PtSnapGetFocusParams,
+    "pt_snap_set_focus": PtSnapSetFocusParams,
+    "pt_snap_list_templates": PtSnapListTemplatesParams,
+    "pt_snap_get_template_info": PtSnapGetTemplateInfoParams,
+    "pt_snap_execute_query": PtSnapExecuteQueryParams,
     "heartbeat": HeartbeatParams,
     "reset_analysis_context": ResetAnalysisContextParams,
     "list_files": ListFilesParams,

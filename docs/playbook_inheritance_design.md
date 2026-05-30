@@ -5,7 +5,7 @@
 当前存在的问题：
 
 1. **Step 1 重复**：每个剧本的 Step 1 几乎都是 `import_trace_file`，在几十个 YAML 中重复编写冗余度高
-2. **全局拦截已存在**：`mcp_server.py` 已有全局硬性拦截（任何工具执行前必须先 `import_trace_file`），但剧本中仍需声明
+2. **全局拦截已存在**：`mcp_server.py` 已有全局硬性拦截，trace/C++ 后端分析工具执行前必须先 `import_trace_file`，但独立数据源工具（如 `pt_snap_*`）可通过白名单从自身初始化步骤开始
 3. **缺乏继承机制**：没有 YAML 继承/混入(Mixin)机制，无法复用公共步骤
 4. **维护困难**：如果需要修改公共步骤，需要逐个修改所有剧本
 
@@ -23,14 +23,13 @@
 senario/
 ├── _base/                      # 公共基础剧本（以下划线开头，不作为独立剧本）
 │   ├── init.yaml               # 初始化模块：import_trace_file
-│   ├── communication_base.yaml # 通信分析基础模块
-│   └── memory_base.yaml        # 内存分析基础模块
+│   └── communication_base.yaml # 通信分析基础模块
 │
 ├── fast_slow_rank/
 │   └── playbook.yaml           # 继承 init
 │
-└── memory_leak/
-    └── playbook.yaml           # 继承 init + memory_base
+└── pt_snap_memory_analysis/
+    └── playbook.yaml           # 独立 SQLite snapshot 数据源，不继承 init
 ```
 
 ## 4. YAML 继承语法

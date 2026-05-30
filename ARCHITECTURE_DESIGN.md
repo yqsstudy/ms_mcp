@@ -39,7 +39,7 @@ sop_steps:
     action: "宏观耗时比对"
     requires: ["load_trace"]  # 声明强依赖
 ```
-MCP 服务启动时，引擎扫描解析这些 YAML，并与底层的原子工具进行强校验绑定。
+MCP 服务启动时，引擎扫描解析这些 YAML，并与底层的原子工具进行强校验绑定。对于 trace/C++ 后端剧本，通常继承 `base_init` 并以 `import_trace_file` 开始；对于独立数据源剧本，例如 `pt_snap_memory_analysis`，则从 `pt_snap_set_focus` 设置 SQLite snapshot 数据库开始。
 
 ### 3.2 状态机强制拦截约束 (Hard Constraints State Tracker)
 为防止大模型发生幻觉或跳步，采用**严格的强制拦截机制（方案 A）**。
@@ -58,11 +58,14 @@ mcp/
 ├── tools/                 # 👉 原子动作层 (Python 代码)：对 C++ RPC 接口的最小粒度封装
 │   ├── loader/
 │   ├── cluster/
-│   └── operator/          # 挂载 @internal_tool()，不直接向外暴露
+│   ├── timeline/
+│   └── pt_snap/           # PyTorch memory snapshot 工具包装层，挂载 @internal_tool()
+│
+├── pt_snap/               # 👉 内存快照分析核心库：SQLite 只读查询、YAML SQL 模板、焦点管理
 │
 ├── senario/               # 👉 场景剧本层 (YAML 配置)：性能专家的领域知识固化中心
 │   ├── fast_slow_rank/playbook.yaml
-│   └── memory_leak/playbook.yaml
+│   └── pt_snap_memory_analysis/playbook.yaml
 │
 ├── mapping/
 │   └── registry.py        # 👉 注册中心：启动时扫盘读取 YAML 和 Tools 并组装 SOP 路由映射

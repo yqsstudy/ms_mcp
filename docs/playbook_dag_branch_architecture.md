@@ -361,7 +361,7 @@ class SessionState:
 │    │   ├── kernel_detail_analysis [Step 5-6] 算子详情分析                       │
 │    │   └── host_side_analysis [Step 5-6] Host侧分析                             │
 │    ├── communication_analysis [Step 2-3] 通信分析                               │
-│    └── memory_analysis [Step 2-4] 内存分析                                      │
+│    └── pt_snap_memory_analysis [Step 1-4] PyTorch 内存快照分析                   │
 └─────────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -640,7 +640,7 @@ base_init [Step 1: import_trace_file]
 │   ├── kernel_detail_analysis [Step 5-6] 算子详情分析
 │   └── host_side_analysis [Step 5-6] Host侧分析
 ├── communication_analysis [Step 2-3] 通信分析
-└── memory_analysis [Step 2-4] 内存分析
+└── pt_snap_memory_analysis [Step 1-4] PyTorch 内存快照分析
 
 ---
 
@@ -760,7 +760,7 @@ base_init [Step 1: import_trace_file]
 所有 5 个阶段已完成，测试全部通过：
 
 ```
-================== 174 passed, 1 skipped, 1 warning ==================
+================== 188 passed, 1 skipped, 1 warning ==================
 ```
 
 ### 12.2 实际文件变更

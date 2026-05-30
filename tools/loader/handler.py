@@ -5,7 +5,7 @@ from __future__ import annotations
 import mcp.types as types
 
 from mapping.framework import import_trace_file_api
-from state import state
+from state import get_current_state
 from utils.response import error_text, format_with_hints
 from utils.decorators import internal_tool
 from utils.path_security import validate_file_path_for_import, PathSecurityError
@@ -40,27 +40,27 @@ async def import_trace_file(
         else:
             validated_path = file_path
 
+        current_state = get_current_state()
+
         # === 2. 检测文件切换，自动重置上下文 ===
-        file_changed = state.check_file_change(validated_path)
+        file_changed = current_state.check_file_change(validated_path)
         if file_changed:
             logger.info("检测到文件切换，已自动重置分析上下文")
 
         # === 3. 执行导入 ===
         body = await import_trace_file_api(project_name, validated_path)
-        ps = state.get_or_create_project(project_name, validated_path)
+        ps = current_state.get_or_create_project(project_name, validated_path)
         ps.set_import_result(body)
 
         # 设置当前项目
-        state.set_current_project(project_name)
+        current_state.set_current_project(project_name)
 
         # === 4. 注册到上下文黑板 ===
-        state.context_board.update(
-            file_path=validated_path,
-            project_name=project_name,
-        )
+        current_state.context_board.set("file_path", validated_path)
+        current_state.context_board.set("project_name", project_name)
 
         # === 5. 记录执行历史 ===
-        state.mark_tool_executed("import_trace_file", {
+        current_state.mark_tool_executed("import_trace_file", {
             "file_path": validated_path,
             "project_name": project_name,
         })
@@ -94,11 +94,12 @@ async def reset_analysis_context() -> list[types.TextContent]:
     Use when starting a new analysis task or when explicitly requested by the user.
     """
     try:
-        old_context = state.context_board.snapshot()
+        current_state = get_current_state()
+        old_context = current_state.context_board.snapshot()
         old_file = old_context.get("context", {}).get("file_path")
         old_analysis_id = old_context.get("context", {}).get("analysis_id")
 
-        state.reset()
+        current_state.reset()
 
         return format_with_hints(
             data={

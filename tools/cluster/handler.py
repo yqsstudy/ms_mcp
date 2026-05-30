@@ -12,7 +12,7 @@ from cpp_client import get_client
 from utils.decorators import require_events, internal_tool
 from utils.response import fmt_json, error_text, format_with_hints
 from utils.logger import logger
-from state import state
+from state import get_current_state
 from .meta import COMM_DURATION_SLOW_RANK_LIST_META, COMM_DURATION_ITERATIONS_META, COMM_MATRIX_GROUP_META
 
 @internal_tool(
@@ -35,7 +35,8 @@ async def communication_duration_slow_rank_list(
     groupIdHash: str = "",
     baselineGroupIdHash: str = ""
 ) -> list[types.TextContent]:
-    resolved_path = state.resolve_cluster_path(clusterPath)
+    current_state = get_current_state()
+    resolved_path = current_state.resolve_cluster_path(clusterPath)
     if not isinstance(resolved_path, str):
         return resolved_path
 
@@ -62,10 +63,10 @@ async def communication_duration_slow_rank_list(
         )
 
         # === 注册结果到上下文黑板 ===
-        state.context_board.register_result("communication_duration_slow_rank_list", body)
+        current_state.context_board.register_result("communication_duration_slow_rank_list", body)
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("communication_duration_slow_rank_list", {
+        current_state.mark_tool_executed("communication_duration_slow_rank_list", {
             "iteration_id": iterationId,
             "target_operator_name": targetOperatorName,
         })
@@ -85,7 +86,8 @@ async def communication_duration_iterations(
     clusterPath: Optional[str] = "",
     isCompare: bool = False
 ) -> list[types.TextContent]:
-    resolved_path = state.resolve_cluster_path(clusterPath)
+    current_state = get_current_state()
+    resolved_path = current_state.resolve_cluster_path(clusterPath)
     if not isinstance(resolved_path, str):
         return resolved_path
 
@@ -104,12 +106,12 @@ async def communication_duration_iterations(
             compare_list = body["iterationOrRankId"].get("compare", [])
 
         # === 注册结果到上下文黑板 ===
-        state.context_board.register_result("communication_duration_iterations", {
+        current_state.context_board.register_result("communication_duration_iterations", {
             "iterationList": compare_list
         })
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("communication_duration_iterations", {
+        current_state.mark_tool_executed("communication_duration_iterations", {
             "is_compare": isCompare,
         })
 
@@ -131,7 +133,8 @@ async def communication_matrix_group(
     baselineIterationId: str = "",
     isCompare: bool = False
 ) -> list[types.TextContent]:
-    resolved_path = state.resolve_cluster_path(clusterPath)
+    current_state = get_current_state()
+    resolved_path = current_state.resolve_cluster_path(clusterPath)
     if not isinstance(resolved_path, str):
         return resolved_path
 
@@ -155,18 +158,18 @@ async def communication_matrix_group(
                     item["groupIdHash"] = item["groupIdHash"].get("compare")
 
         # === 注册结果到上下文黑板 ===
-        state.context_board.set("iteration_id", iterationId)
+        current_state.context_board.set("iteration_id", iterationId)
         if isinstance(body, dict) and "data" in body and body["data"]:
             first_group = body["data"][0]
             if isinstance(first_group, dict):
                 gid = first_group.get("groupIdHash")
                 if gid:
-                    state.context_board.set("group_id_hash", str(gid))
+                    current_state.context_board.set("group_id_hash", str(gid))
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("communication_matrix_group", {
+        current_state.mark_tool_executed("communication_matrix_group", {
             "iteration_id": iterationId,
-            "group_id_hash": state.context_board.get("group_id_hash"),
+            "group_id_hash": current_state.context_board.get("group_id_hash"),
         })
 
         return format_with_hints(body, hints=COMM_MATRIX_GROUP_META["success_hints"])

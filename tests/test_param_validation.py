@@ -18,6 +18,7 @@ from utils.param_validation import (
     CommunicationDurationSlowRankListParams,
     GetUnitFlowsParams,
     GetUnitsInRangeParams,
+    PtSnapExecuteQueryParams,
 )
 
 
@@ -218,6 +219,82 @@ class TestGetUnitsInRangeParams:
         assert not is_valid
 
 
+class TestPtSnapParams:
+    """Tests for pt_snap parameter validation."""
+
+    def test_set_focus_valid_absolute_path(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_set_focus",
+            {"db_path": "/data/snapshot.sqlite", "device_id": 0}
+        )
+        assert is_valid
+        assert validated["db_path"] == "/data/snapshot.sqlite"
+        assert validated["device_id"] == 0
+        assert error is None
+
+    def test_set_focus_rejects_relative_path(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_set_focus",
+            {"db_path": "snapshot.sqlite"}
+        )
+        assert not is_valid
+        assert "db_path" in error
+        assert "absolute path" in error
+
+    def test_set_focus_rejects_negative_device(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_set_focus",
+            {"db_path": "/data/snapshot.sqlite", "device_id": -1}
+        )
+        assert not is_valid
+        assert "device_id" in error
+
+    def test_list_templates_accepts_known_category(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_list_templates",
+            {"category": "business"}
+        )
+        assert is_valid
+        assert validated["category"] == "business"
+
+    def test_list_templates_rejects_unknown_category(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_list_templates",
+            {"category": "unknown"}
+        )
+        assert not is_valid
+        assert "category" in error
+
+    def test_execute_query_defaults_max_rows(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_execute_query",
+            {"template": "memory_peak"}
+        )
+        assert is_valid
+        assert validated["params"] == {}
+        assert validated["max_rows"] == 1000
+
+    def test_execute_query_rejects_max_rows_bounds(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_execute_query",
+            {"template": "memory_peak", "max_rows": 10001}
+        )
+        assert not is_valid
+        assert "max_rows" in error
+
+    def test_execute_query_rejects_bool_max_rows(self):
+        with pytest.raises(ValidationError):
+            PtSnapExecuteQueryParams(template="memory_peak", max_rows=True)
+
+    def test_execute_query_rejects_non_object_params(self):
+        is_valid, validated, error = validate_tool_params(
+            "pt_snap_execute_query",
+            {"template": "memory_peak", "params": []}
+        )
+        assert not is_valid
+        assert "params" in error
+
+
 class TestHeartbeatParams:
     """Tests for heartbeat parameter validation - no required params."""
 
@@ -317,6 +394,11 @@ class TestToolParamModelsRegistry:
             "get_thread_detail",
             "get_unit_flows",
             "get_units_in_range",
+            "pt_snap_get_focus",
+            "pt_snap_set_focus",
+            "pt_snap_list_templates",
+            "pt_snap_get_template_info",
+            "pt_snap_execute_query",
             "heartbeat",
             "reset_analysis_context",
             "list_files",

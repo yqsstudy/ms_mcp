@@ -43,13 +43,15 @@ mcp/
 ├── tools/                 # 👉 原子工具层：通过 @internal_tool 注册到底层，不对外暴露
 │   ├── loader/
 │   ├── cluster/
-│   └── timeline/
+│   ├── timeline/
+│   └── pt_snap/           # 👉 PyTorch memory snapshot SQLite 分析工具包装层
+├── pt_snap/               # 👉 内存快照分析核心库：SQLite 只读查询、模板加载、焦点管理
 ├── mcp_server.py          # 👉 [修改重点] MCP 网关：拦截器与 Meta-Tool 入口
 ├── main.py                # 服务启动入口
 ├── config.py
 ├── cpp_client.py          # Python <-> C++ WebSocket 桥接客户端
 ├── models.py
-├── tests/                 # 👉 单元测试：pytest 测试框架（147 个用例）
+├── tests/                 # 👉 单元测试：pytest 测试框架（188 个通过，1 个跳过）
 │   ├── test_context_board.py
 │   ├── test_path_security.py
 │   ├── test_param_validation.py
@@ -86,6 +88,11 @@ execute_profiler_tool("import_trace_file", ...) → 结果 + 下一步 Schema
 execute_profiler_tool("communication_duration_iterations", ...) → 结果 + 下一步 Schema
 ...
 execute_profiler_tool("get_units_in_range", ...) → 结果 + ✅ 剧本执行完成
+
+search_profiler_tools("PyTorch 显存 内存泄漏") → 选择 pt_snap_memory_analysis
+execute_profiler_tool("pt_snap_set_focus", {"db_path": "..."}) → 结果 + 下一步 Schema
+execute_profiler_tool("pt_snap_list_templates", {}) → 模板列表 + 模板选择提示
+execute_profiler_tool("pt_snap_execute_query", {"template": "memory_peak"}) → 查询结果
 ```
 
 **全程只需调用 1 次 `search_profiler_tools`**。
@@ -145,6 +152,7 @@ pip install uvicorn starlette
 ```powershell
 $env:MSINSIGHT_MCP_TRANSPORT="stdio"
 $env:MSINSIGHT_CPP_AUTO_START_BINARY="xxxxx\profiler_server.exe"
+$env:MSINSIGHT_CPP_LOG_PATH="C:\Users\Administrator\.mindstudio_insight"
 python main.py
 ```
 
@@ -204,7 +212,8 @@ $env:MSINSIGHT_CPP_BACKEND_PORT="9000"
       "env": {
         "MSINSIGHT_MCP_TRANSPORT": "stdio",
         "MSINSIGHT_CPP_BACKEND_HOST": "127.0.0.1",
-        "MSINSIGHT_CPP_BACKEND_PORT": "9000"
+        "MSINSIGHT_CPP_BACKEND_PORT": "9000",
+        "MSINSIGHT_CPP_LOG_PATH": "C:\\Users\\Administrator\\.mindstudio_insight"
       }
     }
   }
@@ -213,12 +222,41 @@ $env:MSINSIGHT_CPP_BACKEND_PORT="9000"
 
 ## 6. 工具能力概览
 
-当前工具分为两大类：
+当前工具分为四类，仍统一通过 `execute_profiler_tool` 调用：
 
-- **global**：心跳、文件列表
-- **timeline/cluster**：导入分析、通信矩阵、慢卡分析、线程详情、时间片查询
+- **global/loader**：心跳、文件列表、导入 trace、重置分析上下文
+- **cluster**：通信迭代、通信矩阵、慢卡分析
+- **timeline**：通信 kernel 详情、线程详情、时间片范围查询、流查询
+- **pt_snap**：PyTorch memory snapshot SQLite 分析，不依赖 C++ trace 导入
 
-你可以通过 MCP 的 `list_tools` 查看运行时真实工具集合。
+### 6.1 pt_snap 内存快照分析
+
+`pt_snap` 用于分析 PyTorch memory snapshot 导出的 SQLite 数据库，查询过程在 Python 进程内完成，不走 C++ WebSocket 后端。它通过 `pt_snap/query/templates/**/*.yaml` 加载 SQL 模板，使用 SQLite 只读连接和 Jinja2 `StrictUndefined` 渲染查询。
+
+内部工具：
+
+| 工具 | 作用 |
+|------|------|
+| `pt_snap_get_focus` | 查看当前进程级 snapshot 分析焦点 |
+| `pt_snap_set_focus` | 设置 snapshot SQLite 数据库绝对路径和可选 `device_id` |
+| `pt_snap_list_templates` | 列出 `basic/statistical/business` 查询模板 |
+| `pt_snap_get_template_info` | 查看模板参数、说明和输出结构 |
+| `pt_snap_execute_query` | 执行模板查询，`max_rows` 默认为 1000，范围 1~10000 |
+
+内置模板包括：`allocation`、`block`、`event`、`callstack_analysis`、`memory_peak`、`leak_detection`。
+
+推荐剧本：`senario/pt_snap_memory_analysis/playbook.yaml`。该剧本从 `pt_snap_set_focus` 开始，不继承 `base_init`，因此不会要求先执行 `import_trace_file`。
+
+示例调用链：
+
+```json
+{"tool_name": "pt_snap_set_focus", "arguments": {"db_path": "D:\\data\\snapshot.sqlite", "device_id": 0}}
+{"tool_name": "pt_snap_list_templates", "arguments": {}}
+{"tool_name": "pt_snap_get_template_info", "arguments": {"name": "memory_peak"}}
+{"tool_name": "pt_snap_execute_query", "arguments": {"template": "memory_peak", "params": {}, "max_rows": 100}}
+```
+
+你可以通过 MCP 的 `list_tools` 查看对外暴露的两个 meta-tools；内部工具集合由 `tools/__init__.py` 导入 handler 后注册到 `utils.decorators.INTERNAL_TOOLS`。
 
 ## 7. 日志与可观测性
 
@@ -268,8 +306,9 @@ $env:MSINSIGHT_LOG_LEVEL="DEBUG"
 
 1. 创建目录 `senario/<scenario>/`
 2. 创建 `playbook.yaml`，定义 id, name, description, keywords, steps
-3. 使用 `extends: "base_init"` 继承公共初始化步骤
-4. 使用简化格式（无需 step 编号和 requires）
+3. 对 trace/C++ 后端分析剧本，使用 `extends: "base_init"` 继承公共初始化步骤
+4. 对独立数据源剧本（例如 `pt_snap_memory_analysis`），可从自己的初始化工具开始，不继承 `base_init`
+5. 使用简化格式（无需 step 编号和 requires）
 
 ```yaml
 id: "my_scenario"
@@ -321,14 +360,19 @@ python -m pytest tests/ -v
 python -m pytest tests/test_navigator.py -v
 ```
 
-当前测试覆盖（174 个用例）：
-- `test_context_board.py`：Context Board 与 Session State（37 个用例）
-- `test_path_security.py`：路径安全校验（20 个用例）
-- `test_param_validation.py`：Pydantic 参数校验（30 个用例）
-- `test_playbook_inheritance.py`：剧本继承与 Mixin（19 个用例）
-- `test_playbook_parsing.py`：Playbook 解析与新字段（20 个用例）
-- `test_navigator.py`：StepNavigator 与自动推进（22 个用例）
-- `test_dag_branch.py`：DAG 分支机制（27 个用例）
+当前测试结果：`188 passed, 1 skipped`。
+
+主要测试覆盖：
+- `test_context_board.py`：Context Board 与 Session State
+- `test_path_security.py`：路径安全校验
+- `test_param_validation.py`：Pydantic 参数校验（包含 pt_snap 参数模型）
+- `test_playbook_inheritance.py`：剧本继承与 Mixin
+- `test_playbook_parsing.py`：Playbook 解析与新字段
+- `test_navigator.py`：StepNavigator 与自动推进
+- `test_dag_branch.py`：DAG 分支机制
+- `test_pt_snap_registration.py`：pt_snap 内部工具注册
+- `test_pt_snap_core.py`：pt_snap SQLite 核心查询能力
+- `test_pt_snap_handler.py`：pt_snap handler 响应与错误处理
 
 ## 12. 设计文档
 
@@ -342,6 +386,7 @@ python -m pytest tests/test_navigator.py -v
 - `docs/playbook_dag_branch_architecture.md` - DAG 分支机制架构设计
 - `docs/playbook_dag_branch_interface.md` - DAG 分支机制接口规范
 - `docs/playbook_dag_branch_workflow.md` - DAG 分支机制实施工作流
+- `docs/pt_snap_memory_analysis.md` - PyTorch memory snapshot 内存分析功能说明
 
 ## 13. 当前实现边界
 

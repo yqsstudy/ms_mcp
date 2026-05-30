@@ -421,6 +421,23 @@ class PlaybookRegistry:
             summary.append(f"- 【{pb.name}】: {pb.description} (相关关键词: {', '.join(pb.keywords)})")
         return "\n".join(summary)
 
+    def get_routing_hints(self, keyword_limit: int = 5) -> str:
+        """Get compact playbook routing hints for MCP tool descriptions."""
+        hints = []
+        for pb in self._playbooks.values():
+            if pb.type == "mixin" or pb.is_abstract:
+                continue
+            keywords = ", ".join(pb.keywords[:keyword_limit])
+            if keywords:
+                hints.append(f"- {pb.id}: {pb.name}; 关键词: {keywords}")
+            else:
+                hints.append(f"- {pb.id}: {pb.name}")
+
+        if not hints:
+            return "当前系统未加载可选择的 SOP 剧本。"
+
+        return "\n".join(hints)
+
     def get_tool_requirements(self, tool_name: str) -> list[str]:
         """Get prerequisite tools for given tool, returns empty list if none."""
         return list(self._tool_requirements.get(tool_name, set()))

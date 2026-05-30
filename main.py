@@ -25,9 +25,12 @@ All settings are in config.py and can be overridden via environment
 variables prefixed with ``MSINSIGHT_`` or via a .env file.
 """
 
+import argparse
 import asyncio
 import signal
 import sys
+from dataclasses import dataclass
+from typing import Literal
 
 import cpp_client as cpp
 from internal.profiler_server import start_profiler_server_if_needed
@@ -35,6 +38,32 @@ import mcp_server
 from config import settings
 from utils.logger import logger, setup_logger
 from state import state
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    transport: Literal["stdio", "sse", "websocket"]
+    host: str
+    port: int
+    log_level: str
+    log_file: str
+
+
+def parse_args(argv: list[str] | None = None) -> RuntimeConfig:
+    parser = argparse.ArgumentParser(description="Run the MSInsight MCP Bridge.")
+    parser.add_argument("--transport", choices=["stdio", "sse", "websocket"], default=settings.mcp_transport)
+    parser.add_argument("--host", default=settings.mcp_host)
+    parser.add_argument("--port", type=int, default=settings.mcp_port)
+    parser.add_argument("--log-level", default=settings.log_level)
+    parser.add_argument("--log-file", default=settings.log_file)
+    args = parser.parse_args(argv)
+    return RuntimeConfig(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        log_level=args.log_level,
+        log_file=args.log_file,
+    )
 
 
 # --------------------------------------------------------------------
@@ -92,13 +121,19 @@ def _handle_signal(sig: int) -> None:
 # Main coroutine
 # --------------------------------------------------------------------
 
-async def _main() -> None:
+async def _main(argv: list[str] | None = None) -> None:
+    runtime = parse_args(argv)
+    settings.log_level = runtime.log_level
+    settings.log_file = runtime.log_file
     setup_logger()
 
     logger.info(
-        "MSInsight MCP Bridge starting — backend={} transport={}",
+        "MSInsight MCP Bridge starting — backend={} transport={} host={} port={} log_file={}",
         settings.cpp_backend_url,
-        settings.mcp_transport,
+        runtime.transport,
+        runtime.host,
+        runtime.port,
+        runtime.log_file,
     )
 
     start_profiler_server_if_needed()
@@ -144,7 +179,7 @@ async def _main() -> None:
             pass  # Windows does not support loop.add_signal_handler for all signals
 
     # --- Start MCP server ---
-    transport = settings.mcp_transport
+    transport = runtime.transport
 
     try:
         if transport == "stdio":
@@ -152,7 +187,7 @@ async def _main() -> None:
 
         elif transport == "sse":
             server_task = asyncio.create_task(
-                mcp_server.run_sse(settings.mcp_host, settings.mcp_port)
+                mcp_server.run_sse(runtime.host, runtime.port)
             )
             await asyncio.wait(
                 [server_task, asyncio.create_task(_shutdown_event.wait())],
@@ -162,7 +197,7 @@ async def _main() -> None:
 
         elif transport == "websocket":
             server_task = asyncio.create_task(
-                mcp_server.run_websocket(settings.mcp_host, settings.mcp_port)
+                mcp_server.run_websocket(runtime.host, runtime.port)
             )
             await asyncio.wait(
                 [server_task, asyncio.create_task(_shutdown_event.wait())],
@@ -186,6 +221,6 @@ async def _main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(_main())
+        asyncio.run(_main(sys.argv[1:]))
     except KeyboardInterrupt:
         pass

@@ -17,7 +17,7 @@ from utils.decorators import internal_tool
 from utils.path_security import validate_path, PathSecurityError
 from utils.logger import logger
 from config import settings
-from state import state
+from state import get_current_state
 from .meta import (
     QUERY_COMMUNICATION_KERNEL_DETAIL_META,
     GET_THREAD_DETAIL_META,
@@ -53,6 +53,7 @@ async def query_communication_kernel_detail(
 ) -> list[types.TextContent]:
     """Query kernel-level detail for a communication operator."""
     try:
+        current_state = get_current_state()
         # === 参数自动补全已在 mcp_server.py 中完成 ===
 
         # 校验可选的 file_path 参数
@@ -62,12 +63,12 @@ async def query_communication_kernel_detail(
             except PathSecurityError as e:
                 return error_text(ValueError(f"路径安全校验失败: {e.message}"))
 
-        cp = state.current_project
+        cp = current_state.current_project
         if cp is None:
-            return error_text(ValueError("No current project set. Call state.set_current_project() first."))
+            return error_text(ValueError("No current project set. Call import_trace_file first."))
 
         target_file = file_path or cp.file_path
-        resolved_path = state.resolve_cluster_path(cluster_path)
+        resolved_path = current_state.resolve_cluster_path(cluster_path)
         if not isinstance(resolved_path, str):
             return resolved_path
 
@@ -105,10 +106,10 @@ async def query_communication_kernel_detail(
         timeline_module.set("current_kernel", body)
 
         # === 注册结果到上下文黑板 ===
-        state.context_board.register_result("query_communication_kernel_detail", body)
+        current_state.context_board.register_result("query_communication_kernel_detail", body)
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("query_communication_kernel_detail", {
+        current_state.mark_tool_executed("query_communication_kernel_detail", {
             "rank_id": rank_id,
             "operator_name": operator_name,
         })
@@ -146,6 +147,7 @@ async def get_thread_detail(
 ) -> list[types.TextContent]:
     """Retrieve thread detail data for a specific event/operator in the timeline."""
     try:
+        current_state = get_current_state()
         # === 参数自动补全已在 mcp_server.py 中完成 ===
 
         # 校验可选的 file_path 参数
@@ -155,9 +157,9 @@ async def get_thread_detail(
             except PathSecurityError as e:
                 return error_text(ValueError(f"路径安全校验失败: {e.message}"))
 
-        cp = state.current_project
+        cp = current_state.current_project
         if cp is None:
-            return error_text(ValueError("No current project set. Call state.set_current_project() first."))
+            return error_text(ValueError("No current project set. Call import_trace_file first."))
 
         cache = cp.get_module("timeline").get("kernel_detail_cache", {})
         kernel = cache.get(f"{rank_id}_{kernel_id}") if rank_id and kernel_id else None
@@ -204,10 +206,10 @@ async def get_thread_detail(
             kernel["duration"] = duration
 
         # === 注册结果到上下文黑板 ===
-        state.context_board.register_result("get_thread_detail", body)
+        current_state.context_board.register_result("get_thread_detail", body)
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("get_thread_detail", {
+        current_state.mark_tool_executed("get_thread_detail", {
             "kernel_id": kernel_id,
             "rank_id": rank_id,
         })
@@ -236,6 +238,7 @@ async def get_unit_flows(
 ) -> list[types.TextContent]:
     """Retrieve flow data for a specific operator/event in the timeline."""
     try:
+        current_state = get_current_state()
         # === 参数自动补全已在 mcp_server.py 中完成 ===
 
         # 校验可选的 file_path 参数
@@ -245,9 +248,9 @@ async def get_unit_flows(
             except PathSecurityError as e:
                 return error_text(ValueError(f"路径安全校验失败: {e.message}"))
 
-        cp = state.current_project
+        cp = current_state.current_project
         if cp is None:
-            return error_text(ValueError("No current project set. Call state.set_current_project() first."))
+            return error_text(ValueError("No current project set. Call import_trace_file first."))
 
         cache = cp.get_module("timeline").get("kernel_detail_cache", {})
         kernel = cache.get(f"{rank_id}_{op_id}") if rank_id and op_id else None
@@ -300,7 +303,7 @@ async def get_unit_flows(
         )
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("get_unit_flows", {
+        current_state.mark_tool_executed("get_unit_flows", {
             "rank_id": rank_id,
             "op_id": op_id,
             "start_time": start_time,
@@ -329,6 +332,7 @@ async def get_units_in_range(
 ) -> list[types.TextContent]:
     """Retrieve list of operators within a selected time range from timeline swimlanes."""
     try:
+        current_state = get_current_state()
         # === 参数自动补全已在 mcp_server.py 中完成 ===
 
         # 校验可选的 file_path 参数
@@ -338,9 +342,9 @@ async def get_units_in_range(
             except PathSecurityError as e:
                 return error_text(ValueError(f"路径安全校验失败: {e.message}"))
 
-        cp = state.current_project
+        cp = current_state.current_project
         if cp is None:
-            return error_text(ValueError("No current project set. Call state.set_current_project() first."))
+            return error_text(ValueError("No current project set. Call import_trace_file first."))
 
         kernel = cp.get_module("timeline").get("current_kernel")
         if kernel:
@@ -370,7 +374,7 @@ async def get_units_in_range(
         )
 
         # === 记录执行历史 ===
-        state.mark_tool_executed("get_units_in_range", {
+        current_state.mark_tool_executed("get_units_in_range", {
             "rank_id": rank_id,
             "start_time": start_time,
             "end_time": end_time,

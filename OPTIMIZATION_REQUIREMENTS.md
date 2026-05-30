@@ -14,7 +14,7 @@
 |--------|------|------|------|------|
 | **P0** | 状态管理 | 会话状态污染防范 | 多轮对话返回脏数据 | ✅ 已修复 |
 | **P0** | 安全 | 路径注入风险 | 安全漏洞，可访问敏感文件 | ✅ 已修复 |
-| **P0** | 功能缺陷 | operator.py 工具未注册 @internal_tool | 功能不可用 | ✅ 已修复 |
+| **P0** | 功能缺陷 | pt_snap 内存快照分析未接入当前元工具架构 | PyTorch memory snapshot 分析不可用 | ✅ 已迁移 |
 | **P1** | 架构 | 跨步骤参数隐式流转 | LLM 幻觉主要来源 | ✅ 已修复 |
 | **P1** | 架构 | 动态传参强校验 | 参数错误难以定位 | ✅ 已修复 |
 | **P1** | 架构 | 公共前置逻辑复用 | YAML 冗余，重复加载 | ✅ 已修复 |
@@ -62,7 +62,7 @@
    - 新增 `reset_analysis_context` 元工具
    - LLM 或用户可主动调用清理状态
 
-5. **单元测试**：`tests/test_context_board.py`（31 个测试用例全部通过）
+5. **单元测试**：`tests/test_context_board.py`（37 个测试用例全部通过）
 
 ---
 
@@ -96,25 +96,31 @@
 
 ---
 
-### 3.3 operator.py 工具未注册 (Missing Decorators) ✅ 已修复
+### 3.3 pt_snap 内存快照分析接入 ✅ 已迁移
 
 **痛点**：
-`tools/operator/operator.py` 中的函数（如 `get_memory_usage`, `get_operator_categories` 等）没有使用 `@internal_tool` 装饰器，导致它们无法被元工具系统调用，功能实际不可用。
+老项目新增了 `pt_snap` PyTorch memory snapshot SQLite 分析能力，但当前重构后的 MCP 项目只暴露 `search_profiler_tools` / `execute_profiler_tool` 两个元工具，无法直接复用老项目直接暴露 MCP tools 的实现方式。
 
 **已实施的解决方案**：
 
-1. **为所有工具添加 `@internal_tool` 装饰器**：
-   - Operator 工具：`get_operator_categories`, `get_operator_statistics`, `get_operator_details`
-   - Memory 工具：`get_memory_usage`, `get_memory_operators`, `get_memory_leaks`
-   - Summary 工具：`get_summary_top_data`, `get_summary_statistics`, `get_communication_advisor`
+1. **迁移核心库**：新增根目录 `pt_snap/`，保留老项目的 SQLite 只读连接、focus 管理、YAML SQL 模板加载和 Jinja2 渲染能力。
 
-2. **定义工具元数据**：每个工具都有对应的 `*_META` 字典，包含 name、description、input_schema
+2. **按当前架构包装内部工具**：新增 `tools/pt_snap/meta.py` 与 `tools/pt_snap/handler.py`，通过 `@internal_tool` 注册：
+   - `pt_snap_get_focus`
+   - `pt_snap_set_focus`
+   - `pt_snap_list_templates`
+   - `pt_snap_get_template_info`
+   - `pt_snap_execute_query`
 
-3. **更新 `tools/__init__.py`**：导入 operator 模块以触发装饰器注册
+3. **接入工具注册**：更新 `tools/__init__.py`，导入 `tools.pt_snap.handler` 触发装饰器注册。
 
-4. **更新 Pydantic 参数校验**：在 `utils/param_validation.py` 中添加所有新工具的参数模型
+4. **更新 Pydantic 参数校验**：在 `utils/param_validation.py` 中添加 pt_snap 参数模型，覆盖路径、模板名、分类、`device_id`、`max_rows` 和 `params` 类型约束。
 
-5. **清理死代码**：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码
+5. **新增剧本**：新增 `senario/pt_snap_memory_analysis/playbook.yaml`，从 `pt_snap_set_focus` 开始，不继承 `base_init`，因为该流程不依赖 C++ trace 导入。
+
+6. **调整网关前置校验**：`mcp_server.py` 允许 `pt_snap_*` 作为独立数据源工具跳过 `import_trace_file` 全局前置要求。
+
+7. **补充测试**：新增 `test_pt_snap_registration.py`、`test_pt_snap_core.py`、`test_pt_snap_handler.py`，并扩展 `test_param_validation.py`。
 
 ---
 
@@ -197,7 +203,7 @@
 
 4. **设计文档**：`docs/pydantic_validation_design.md`
 
-5. **单元测试**：`tests/test_param_validation.py`（30 个测试用例全部通过）
+5. **单元测试**：`tests/test_param_validation.py`（包含 pt_snap 参数模型覆盖）
 
 ---
 
@@ -256,7 +262,7 @@
    from cpp_client import get_client  # 重复导入
    ```
 
-2. **死代码**：`global_tools.py` 和 `operator.py` 中约 100+ 行被注释的工具定义
+2. **死代码**：历史工具文件中曾存在较多被注释的 `TOOLS` / `DISPATCH` 直接暴露定义
 
 3. **异常处理过于宽泛**：
    ```python
@@ -268,13 +274,10 @@
 
 1. **删除死代码**：
    - `tools/loader/global_tools.py`：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码（约 100 行）
-   - `tools/operator/operator.py`：删除 `TOOLS` 和 `DISPATCH` 字典中的注释代码（约 160 行）
 
-2. **统一使用 `@internal_tool` 装饰器**：所有工具函数都通过装饰器注册，不再需要手动维护 `TOOLS` 和 `DISPATCH` 字典
+2. **统一使用 `@internal_tool` 装饰器**：所有工具函数都通过装饰器注册，不再需要手动维护直接暴露给 MCP 的 `TOOLS` 和 `DISPATCH` 字典
 
-3. **代码行数变化**：
-   - `global_tools.py`：从 302 行减少到 72 行
-   - `operator.py`：从 483 行减少到 323 行（增加了装饰器和元数据定义）
+3. **新增工具类别保持分层**：`pt_snap` 核心库位于根目录 `pt_snap/`，当前 MCP 架构适配层位于 `tools/pt_snap/`
 
 ---
 
@@ -287,14 +290,18 @@
 
 1. 使用 `pytest` + `pytest-asyncio` 建立测试框架
 2. 已覆盖核心路径：
-   - `tests/test_context_board.py`：Context Board 与 Session State 测试（31 个用例）
-   - `tests/test_path_security.py`：路径安全校验测试（20 个用例）
+   - `tests/test_context_board.py`：Context Board 与 Session State 测试
+   - `tests/test_path_security.py`：路径安全校验测试
+   - `tests/test_param_validation.py`：Pydantic 参数校验（包含 pt_snap）
+   - `tests/test_playbook_inheritance.py` / `tests/test_playbook_parsing.py`：剧本继承与解析
+   - `tests/test_navigator.py` / `tests/test_dag_branch.py`：自动推进与 DAG 分支机制
+   - `tests/test_pt_snap_registration.py` / `tests/test_pt_snap_core.py` / `tests/test_pt_snap_handler.py`：pt_snap 注册、核心查询与 handler 行为
 3. 使用 `conftest.py` 配置测试环境
 
 **运行测试**：
 ```bash
 python -m pytest tests/ -v
-# 结果：50 passed, 1 skipped
+# 当前结果：188 passed, 1 skipped
 ```
 
 ---
@@ -415,7 +422,7 @@ subprocess.run(["taskkill", "/F", "/IM", binary_name], ...)  # Windows only
 ### 阶段一：P0 修复（预计 2-3 天）
 - [x] 实现会话状态自动清理与显式重置接口（Context Board 机制）
 - [x] 添加路径白名单校验，防止路径注入
-- [x] 为 `operator.py` 工具添加 `@internal_tool` 装饰器
+- [x] 将 `pt_snap` 内存快照分析迁移到当前 `@internal_tool` + Playbook 架构
 
 ### 阶段二：P1 补齐（预计 3-5 天）
 - [x] 实现上下文黑板机制，自动补全参数

@@ -177,7 +177,7 @@
 
 ### 5.2 测试结果
 
-**总测试数**: 147 个测试通过，1 个跳过
+**当前总测试数**: 188 个测试通过，1 个跳过
 
 | 测试文件 | 测试数 | 状态 |
 |----------|--------|------|
@@ -187,6 +187,10 @@
 | `test_playbook_inheritance.py` | 19 | ✅ |
 | `test_playbook_parsing.py` | 20 | ✅ |
 | `test_navigator.py` | 22 | ✅ |
+| `test_dag_branch.py` | 27 | ✅ |
+| `test_pt_snap_registration.py` | 1 | ✅ |
+| `test_pt_snap_core.py` | 1 | ✅ |
+| `test_pt_snap_handler.py` | 3 | ✅ |
 
 ### 5.3 验收结果
 

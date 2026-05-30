@@ -26,6 +26,8 @@ Atomic analytical tools are logically modularized in the `tools/` directory but 
   5. Add your new tool to a `senario/**/*.yaml` playbook so the LLM knows when and how to use it.
   6. Make sure the module is imported in `tools/__init__.py` to trigger the decorator registration.
 
+Current non-C++ tool family: `pt_snap` lives in root `pt_snap/` with wrappers in `tools/pt_snap/`. It analyzes PyTorch memory snapshot SQLite databases in-process, starts from `pt_snap_set_focus`, and is documented by `senario/pt_snap_memory_analysis/playbook.yaml`.
+
 ## Running and Testing
 
 Use `main.py` to start the server. Configuration is managed via `config.py` using `pydantic-settings`.

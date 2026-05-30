@@ -28,7 +28,8 @@ from __future__ import annotations
 import os
 import json
 import asyncio
-from typing import Any, TYPE_CHECKING
+import time
+from typing import Any, Optional, TYPE_CHECKING
 
 import anyio
 import mcp.server.stdio as mcp_stdio
@@ -39,12 +40,14 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from config import settings
+import cpp_client as cpp
 import tools  # Import to trigger all @internal_tool decorators
 from mapping.registry import registry, PlaybookRegistry
 from utils.decorators import INTERNAL_TOOLS
 from utils.logger import logger
 from utils.param_validation import validate_tool_params
-from state import state
+from utils.response import format_error
+from state import SessionState, get_current_state, use_session_state
 
 if TYPE_CHECKING:
     from state.session import PlaybookSwitchResult, PlaybookCompletionInfo
@@ -62,6 +65,73 @@ registry.load_playbooks(senario_dir)
 
 server = Server("msinsight-profiler")
 
+TOOLS_WITHOUT_TRACE_IMPORT = {
+    "heartbeat",
+    "list_files",
+    "reset_analysis_context",
+    "pt_snap_get_focus",
+    "pt_snap_set_focus",
+    "pt_snap_list_templates",
+    "pt_snap_get_template_info",
+    "pt_snap_execute_query",
+}
+
+MAX_LOG_TEXT_LENGTH = 4000
+
+
+def _truncate_for_log(value: Any, max_length: int = MAX_LOG_TEXT_LENGTH) -> str:
+    text = str(value)
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}... <truncated {len(text) - max_length} chars>"
+
+
+def _content_to_log_dict(content: Any) -> dict[str, Any]:
+    if isinstance(content, types.TextContent):
+        return {
+            "type": "text",
+            "text_length": len(content.text),
+            "text": _truncate_for_log(content.text),
+        }
+    if hasattr(content, "model_dump"):
+        dumped = content.model_dump()
+        if "text" in dumped and isinstance(dumped["text"], str):
+            dumped["text_length"] = len(dumped["text"])
+            dumped["text"] = _truncate_for_log(dumped["text"])
+        return dumped
+    return {"type": type(content).__name__, "value": _truncate_for_log(content)}
+
+
+def _backend_readiness_text() -> str:
+    status = cpp.backend_status()
+    connected_text = "connected" if status["connected"] else "degraded/disconnected"
+    return (
+        "\n\n---\n"
+        "### MCP Server Status\n"
+        f"- MCP server: alive\n"
+        f"- C++ backend: {connected_text}\n"
+        f"- Backend URL: {status['url']}\n"
+        "- pt_snap tools: available without C++ backend\n"
+    )
+
+
+def _log_tool_response(
+    name: str,
+    response: list[Any],
+    started_at: float | None = None,
+    status: str = "success",
+) -> list[Any]:
+    elapsed_ms = None if started_at is None else round((time.perf_counter() - started_at) * 1000, 2)
+    logger.info(
+        "MCP tool response: name={} status={} elapsed_ms={} parts={} payload={}",
+        name,
+        status,
+        elapsed_ms,
+        len(response),
+        _truncate_for_log(json.dumps([_content_to_log_dict(item) for item in response], ensure_ascii=False, default=str)),
+    )
+    return response
+
 
 # --------------------------------------------------------------------
 # Tool list handler
@@ -69,58 +139,69 @@ server = Server("msinsight-profiler")
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    “””只暴露两把万能钥匙给大模型：搜索排查剧本、执行内部调用。”””
+    """只暴露两把万能钥匙给大模型：搜索排查剧本、执行内部调用。"""
+    started_at = time.perf_counter()
 
-    return [
+    routing_hints = registry.get_routing_hints()
+
+    tool_list = [
         types.Tool(
-            name=”search_profiler_tools”,
+            name="search_profiler_tools",
             description=(
-                “【性能排查入口工具 - 必调】\n”
-                “当你需要开始排查性能问题时，第一步必须调用此工具。它会返回可用的排查剧本列表。\n\n”
-                “👉 用法：将用户的报错现象或你想查的方向作为 query 传入，即可获取匹配的剧本列表。\n”
-                “你也可以通过 select_playbook 参数直接选择一个剧本。”
+                "【性能排查入口工具 - 必调】\n"
+                "当你需要开始排查性能问题时，第一步必须调用此工具。它会根据 query 推荐或选择排查剧本。\n\n"
+                f"当前可选剧本：\n{routing_hints}\n\n"
+                "👉 用法：将用户的报错现象或分析方向作为 query 传入。"
+                "如果已明确剧本 ID，可同时传 select_playbook 直接选择，减少一次选择调用。"
             ),
             inputSchema={
-                “type”: “object”,
-                “properties”: {
-                    “query”: {
-                        “type”: “string”,
-                        “description”: “现象关键词，例如 '卡顿'、'无响应'、'慢节点' 等”
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "现象关键词，例如 '卡顿'、'无响应'、'慢节点' 等"
                     },
-                    “select_playbook”: {
-                        “type”: “string”,
-                        “description”: “可选，直接选择剧本 ID（如 'fast_slow_rank'）”
+                    "select_playbook": {
+                        "type": "string",
+                        "description": "可选，直接选择剧本 ID（如 'fast_slow_rank'）"
                     }
                 },
-                “required”: [“query”]
+                "required": ["query"]
             }
         ),
         types.Tool(
-            name=”execute_profiler_tool”,
+            name="execute_profiler_tool",
             description=(
-                “【性能分析底层执行器】\n”
-                “用于执行具体的 C++ 性能分析指令（如查看耗时、拉取慢节点等）。\n”
-                “⚠️ 警告：你必须严格遵循剧本步骤顺序依次调用。系统中内置了强约束状态机，”
-                “乱跳步骤、缺少前置(requires)的裸调用将会被系统硬性拦截报错！\n”
-                “参数必须严格对照响应中的 JSON Schema 生成。”
+                "【性能分析底层执行器】\n"
+                "用于执行具体的 C++ 性能分析指令（如查看耗时、拉取慢节点等）。\n"
+                "⚠️ 警告：你必须严格遵循剧本步骤顺序依次调用。系统中内置了强约束状态机，"
+                "乱跳步骤、缺少前置(requires)的裸调用将会被系统硬性拦截报错！\n"
+                "参数必须严格对照响应中的 JSON Schema 生成。"
             ),
             inputSchema={
-                “type”: “object”,
-                “properties”: {
-                    “tool_name”: {
-                        “type”: “string”,
-                        “description”: “要执行的内部原子工具名称”
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "要执行的内部原子工具名称"
                     },
-                    “arguments”: {
-                        “type”: “object”,
-                        “description”: “传递给该内部工具的 Json 参数字典”,
-                        “additionalProperties”: True
+                    "arguments": {
+                        "type": "object",
+                        "description": "传递给该内部工具的 Json 参数字典",
+                        "additionalProperties": True
                     }
                 },
-                “required”: [“tool_name”, “arguments”]
+                "required": ["tool_name", "arguments"]
             }
         )
     ]
+    logger.info(
+        "MCP list_tools response: status=success elapsed_ms={} tool_count={} tools={}",
+        round((time.perf_counter() - started_at) * 1000, 2),
+        len(tool_list),
+        _truncate_for_log(json.dumps([tool.model_dump() for tool in tool_list], ensure_ascii=False, default=str)),
+    )
+    return tool_list
 
 
 # --------------------------------------------------------------------
@@ -131,23 +212,41 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(
     name: str, arguments: dict[str, Any]
 ) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    current_state = get_current_state()
+    started_at = time.perf_counter()
+    logger.info(
+        "MCP tool request: name={} arguments={}",
+        name,
+        _truncate_for_log(json.dumps(arguments or {}, ensure_ascii=False, default=str)),
+    )
+
     if name == "search_profiler_tools":
-        query = arguments.get("query", "")
+        query = arguments.get("query") or ""
         select_playbook = arguments.get("select_playbook")
         logger.info("🔎 Meta-Tool search requested: {} (select: {})", query, select_playbook)
 
         # 如果用户直接选择了剧本（剧本切换）
         if select_playbook:
             # 使用新的 switch_playbook 方法
-            result = state.switch_playbook(select_playbook, registry)
+            result = current_state.switch_playbook(select_playbook, registry)
             if result.success:
                 # 切换成功，返回执行路径和下一步信息
                 summary = registry.get_playbook_summary(select_playbook)
                 switch_info = format_switch_result(result)
-                return [types.TextContent(type="text", text=f"{switch_info}\n\n{summary}")]
+                next_step_info = _build_next_step_info("") or ""
+                return _log_tool_response(name, [types.TextContent(type="text", text=f"{switch_info}\n\n{summary}{next_step_info}")], started_at)
             else:
                 # 切换失败，返回错误信息
-                return [types.TextContent(type="text", text=f"⛔️ {result.error}")]
+                return _log_tool_response(
+                    name,
+                    format_error(
+                        code="PLAYBOOK_SWITCH_FAILED",
+                        message=result.error or "Playbook switch failed",
+                        next_action="Call search_profiler_tools with a valid select_playbook value.",
+                    ),
+                    started_at,
+                    "error",
+                )
 
         # DAG 感知搜索
         dag_result = registry.search_playbooks_dag(query)
@@ -155,15 +254,17 @@ async def call_tool(
         # 构建响应
         result_text = format_dag_search_result(dag_result, registry)
 
-        # 如果只有一个推荐剧本，自动选择
-        if len(dag_result["recommended"]) == 1:
-            auto_id = dag_result["recommended"][0].id
-            state.set_current_playbook(auto_id)
+        # 如果查询能唯一定位剧本，自动选择
+        matched_playbook = _single_playbook_match(dag_result, query)
+        if matched_playbook:
+            auto_id = matched_playbook.id
+            current_state.set_current_playbook(auto_id)
             summary = registry.get_playbook_summary(auto_id)
-            result_text += f"\n\n✅ 已自动选择剧本: {auto_id}\n\n{summary}"
+            next_step_info = _build_next_step_info("") or ""
+            result_text += f"\n\n✅ 已自动选择剧本: {auto_id}\n\n{summary}{next_step_info}"
             logger.info("Auto-selected playbook: {}", auto_id)
 
-        return [types.TextContent(type="text", text=result_text)]
+        return _log_tool_response(name, [types.TextContent(type="text", text=result_text)], started_at)
 
     elif name == "execute_profiler_tool":
         tool_name = arguments.get("tool_name")
@@ -171,13 +272,23 @@ async def call_tool(
         logger.info("🚀 Meta-Tool execute requested: {} args={}", tool_name, tool_args)
 
         if not tool_name or tool_name not in INTERNAL_TOOLS:
-            return [types.TextContent(type="text", text=f"⛔️ 错误：未知的内部工具 '{tool_name}'。可能尚未注册。")]
+            return _log_tool_response(
+                name,
+                format_error(
+                    code="UNKNOWN_INTERNAL_TOOL",
+                    message=f"Unknown internal tool: {tool_name}",
+                    next_action="Call search_profiler_tools and choose a tool from the returned playbook schema.",
+                    details={"tool_name": tool_name, "available_tools": sorted(INTERNAL_TOOLS)},
+                ),
+                started_at,
+                "error",
+            )
 
         internal = INTERNAL_TOOLS[tool_name]
 
         # === 0. 全局硬性兜底拦截：任何分析工具执行前，必须至少导入过一次 Trace 文件！ ===
-        valid_history = state.execution_history
-        if tool_name != "import_trace_file" and "import_trace_file" not in valid_history:
+        valid_history = current_state.execution_history
+        if tool_name not in TOOLS_WITHOUT_TRACE_IMPORT and "import_trace_file" not in valid_history:
             error_msg = (
                 f"⛔️ 全局硬性拦截：未初始化分析目标！\n\n"
                 f"在调用任何分析工具（如 `{tool_name}`）之前，你必须第一步调用 `import_trace_file` "
@@ -186,13 +297,23 @@ async def call_tool(
                 "👉 请撤回操作，向用户要一个 profiling json 文件的绝对路径，并调用 `import_trace_file`！"
             )
             logger.warning("Blocked Execution: Global assertion failed. Missing 'import_trace_file'.")
-            return [types.TextContent(type="text", text=error_msg)]
+            return _log_tool_response(
+                name,
+                format_error(
+                    code="TRACE_NOT_IMPORTED",
+                    message=error_msg,
+                    next_action="Call import_trace_file with a valid profiling JSON file path before backend analysis tools.",
+                    details={"tool_name": tool_name, "execution_history": valid_history},
+                ),
+                started_at,
+                "blocked",
+            )
 
         # === 获取当前 Playbook ===
-        playbook = registry.get_playbook(state.current_playbook_id)
+        playbook = registry.get_playbook(current_state.current_playbook_id)
 
         # === 1. 参数自动补全（从 Playbook.context_inputs 获取映射）===
-        completed_args = state.context_board.auto_complete_params(tool_name, tool_args, playbook)
+        completed_args = current_state.context_board.auto_complete_params(tool_name, tool_args, playbook)
         if completed_args != tool_args:
             logger.info("参数自动补全: {} → {}", tool_args, completed_args)
 
@@ -208,7 +329,7 @@ async def call_tool(
                         # 检查是否是决策字段
                         if is_decision_field(context_key, playbook):
                             # 注册决策，返回失效的步骤
-                            decision_invalidated = state.context_board.register_decision(
+                            decision_invalidated = current_state.context_board.register_decision(
                                 tool_name, {context_key: completed_args[param_name]}, playbook
                             )
                             if decision_invalidated:
@@ -221,10 +342,20 @@ async def call_tool(
         is_valid, validated_args, validation_error = validate_tool_params(tool_name, completed_args)
         if not is_valid:
             logger.warning("参数校验拦截: {} - {}", tool_name, validation_error)
-            return [types.TextContent(type="text", text=validation_error)]
+            return _log_tool_response(
+                name,
+                format_error(
+                    code="PARAM_VALIDATION_FAILED",
+                    message=validation_error,
+                    next_action="Regenerate arguments according to the current tool input schema.",
+                    details={"tool_name": tool_name, "input_schema": internal.get("input_schema", {})},
+                ),
+                started_at,
+                "validation_error",
+            )
 
         # === 4. 检测参数变化 & 步骤回退 ===
-        invalidated_tools = state.mark_tool_executed(tool_name, validated_args, playbook)
+        invalidated_tools = current_state.mark_tool_executed(tool_name, validated_args, playbook)
 
         # 合并决策回滚和参数变化回滚
         all_invalidated = list(set(invalidated_tools + decision_invalidated))
@@ -239,18 +370,28 @@ async def call_tool(
 
         # === 5. 剧本防跳步：强拦截断言！===
         requires = registry.get_tool_requirements(tool_name)
-        is_valid_prereq, missing = state.verify_prerequisites(requires)
+        is_valid_prereq, missing = current_state.verify_prerequisites(requires)
 
         if not is_valid_prereq:
             error_msg = (
                 f"⛔️ 执行操作被强行断开拦截！发生严重依赖跳步。\n\n"
                 f"根据当前专家的最佳排查路径要求，在调用 `{tool_name}` 前，"
                 f"需要你先成功获取到 `{missing}` 工具的前置成果与状态。\n"
-                f"当前有效执行历史: {state.execution_history}。\n"
+                f"当前有效执行历史: {current_state.execution_history}。\n"
                 "👉 请撤回操作，认真重读并遵守 SOP 的 `requires` 约束链路重新执行！"
             )
             logger.warning("Blocked Execution: LLM tried to skip steps. Missing: {}", missing)
-            return [types.TextContent(type="text", text=error_msg)]
+            return _log_tool_response(
+                name,
+                format_error(
+                    code="PREREQUISITE_NOT_MET",
+                    message=error_msg,
+                    next_action="Execute the missing prerequisite tools in playbook order before retrying.",
+                    details={"tool_name": tool_name, "missing": missing, "execution_history": current_state.execution_history},
+                ),
+                started_at,
+                "blocked",
+            )
 
         # === 6. 执行工具 ===
         handler = internal["handler"]
@@ -259,13 +400,13 @@ async def call_tool(
 
             # === 7. 结果注册（从 Playbook.outputs 获取提取规则）===
             if playbook:
-                state.context_board.register_result(tool_name, results, playbook)
+                current_state.context_board.register_result(tool_name, results, playbook)
             logger.debug("Tool {} executed successfully. Context: {}",
-                        tool_name, state.context_board.snapshot())
+                        tool_name, current_state.context_board.snapshot())
 
             # === 8. 检查是否有决策点，追加决策提示 ===
             if playbook:
-                candidates = state.context_board.get_decision_candidates(tool_name, playbook)
+                candidates = current_state.context_board.get_decision_candidates(tool_name, playbook)
                 if candidates:
                     from utils.decision_format import format_decision_prompt
                     # 获取最后一个 TextContent 追加决策提示
@@ -299,17 +440,32 @@ async def call_tool(
                         )
                         break
 
-            for idx, res in enumerate(results):
-                if isinstance(res, types.TextContent):
-                    logger.debug("Tool {} response part {} len: {}", tool_name, idx, len(res.text))
-
-            return results
+            return _log_tool_response(name, results, started_at)
         except Exception as exc:
             logger.exception("Error executing internal tool '{}': {}", tool_name, exc)
-            return [types.TextContent(type="text", text=f"内部工具底层执行报错 ({tool_name}): {exc}")]
+            return _log_tool_response(
+                name,
+                format_error(
+                    code="INTERNAL_TOOL_ERROR",
+                    message=f"Internal tool execution failed: {exc}",
+                    recoverable=False,
+                    details={"tool_name": tool_name},
+                ),
+                started_at,
+                "exception",
+            )
 
     else:
-        return [types.TextContent(type="text", text=f"ERROR: Unknown meta-tool '{name}'.")]
+        return _log_tool_response(
+            name,
+            format_error(
+                code="UNKNOWN_META_TOOL",
+                message=f"Unknown meta-tool: {name}",
+                next_action="Use tools/list and call one of the exposed MCP meta-tools.",
+            ),
+            started_at,
+            "error",
+        )
 
 
 # --------------------------------------------------------------------
@@ -327,14 +483,15 @@ def _build_next_step_info(completed_tool: str) -> Optional[str]:
     """
     from state.navigator import StepNavigator
 
-    if not state.current_playbook_id:
+    current_state = get_current_state()
+    if not current_state.current_playbook_id:
         return None
 
-    playbook = registry.get_playbook(state.current_playbook_id)
+    playbook = registry.get_playbook(current_state.current_playbook_id)
     if not playbook:
         return None
 
-    navigator = StepNavigator(state)
+    navigator = StepNavigator(current_state)
     next_step = navigator.get_current_step(playbook)
 
     if not next_step:
@@ -381,6 +538,32 @@ def _build_next_step_info(completed_tool: str) -> Optional[str]:
 # --------------------------------------------------------------------
 # Helper: Format DAG search result
 # --------------------------------------------------------------------
+
+def _single_playbook_match(dag_result: dict, query: str):
+    normalized_query = query.lower()
+    candidates = list(dag_result.get("recommended") or [])
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    deep_matches = []
+    for playbook in dag_result.get("deep_analysis") or []:
+        haystack = " ".join(
+            [
+                playbook.id,
+                playbook.name,
+                playbook.description,
+                " ".join(playbook.keywords),
+            ]
+        ).lower()
+        if normalized_query and any(token in haystack for token in normalized_query.split()):
+            deep_matches.append(playbook)
+
+    if len(deep_matches) == 1:
+        return deep_matches[0]
+
+    return None
+
 
 def format_dag_search_result(dag_result: dict, registry: PlaybookRegistry) -> str:
     """格式化 DAG 搜索结果。"""
@@ -563,7 +746,8 @@ async def run_websocket(host: str, port: int) -> None:
         remote = ws.remote_address
         logger.info("MCP WebSocket client connected: {}", remote)
         try:
-            await _bridge_ws_session(ws)
+            with use_session_state(SessionState()):
+                await _bridge_ws_session(ws)
         except Exception as exc:
             logger.exception("Session error for {}: {}", remote, exc)
         finally:

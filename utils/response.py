@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any
 
 import mcp.types as types
@@ -10,7 +11,39 @@ import mcp.types as types
 
 def fmt_json(data: Any) -> str:
     """Serialise arbitrary data to a pretty JSON string."""
-    return json.dumps(data, indent=2, ensure_ascii=False)
+    return json.dumps(data, indent=2, ensure_ascii=False, default=_json_default)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "__dict__"):
+        return value.__dict__
+    return str(value)
+
+
+def format_error(
+    code: str,
+    message: str,
+    recoverable: bool = True,
+    next_action: str | None = None,
+    details: dict | None = None,
+) -> list[types.TextContent]:
+    payload = {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+            "recoverable": recoverable,
+        },
+    }
+    if next_action:
+        payload["error"]["next_action"] = next_action
+    if details:
+        payload["error"]["details"] = details
+    return [types.TextContent(type="text", text=fmt_json(payload))]
 
 
 def format_with_hints(

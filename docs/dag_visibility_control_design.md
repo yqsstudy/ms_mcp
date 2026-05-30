@@ -73,7 +73,7 @@
 | ID | 名称 | 描述 | 关键词 |
 |----|------|------|--------|
 | fast_slow_rank | 快慢节点排查 | 诊断分布式训练中慢节点导致的通信卡顿 | 慢节点, 卡顿 |
-| memory_leak | 内存泄漏排查 | 分析训练过程中的内存泄漏问题 | 内存, OOM |
+| pt_snap_memory_analysis | PyTorch 内存快照分析剧本 | 分析 memory snapshot SQLite 中的显存分配、峰值、调用栈与疑似泄漏 | memory snapshot, PyTorch, 显存, 内存泄漏 |
 | operator_analysis | 算子性能分析 | 定位计算瓶颈 | 算子, 性能 |
 
 💡 请选择一个剧本开始排查，或描述你的问题让我推荐。

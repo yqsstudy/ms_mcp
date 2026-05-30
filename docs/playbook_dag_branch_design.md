@@ -153,14 +153,14 @@ search_profiler_tools()
 │  │   ├── kernel_detail_analysis [Step 5-6] 算子详情分析         │
 │  │   └── host_side_analysis [Step 5-6] Host侧分析               │
 │  ├── communication_analysis [Step 2-3] 通信分析                 │
-│  └── memory_analysis [Step 2-4] 内存分析                        │
+│  └── pt_snap_memory_analysis [Step 1-4] PyTorch 内存快照分析      │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │ 请选择剧本开始分析 (输入剧本 ID 或序号):                         │
 │                                                                 │
 │ 1. fast_slow_rank (推荐) - 慢节点排查                           │
 │ 2. communication_analysis - 通信分析                            │
-│ 3. memory_analysis - 内存分析                                   │
+│ 3. pt_snap_memory_analysis - PyTorch 内存快照分析                │
 │ 4. kernel_detail_analysis - 算子详情分析 (深度分析)              │
 └─────────────────────────────────────────────────────────────────┘
 ```

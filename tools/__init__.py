@@ -4,5 +4,6 @@
 from tools.loader import global_tools, handler as loader_handler
 from tools.timeline import handler as timeline_handler
 from tools.cluster import handler as cluster_handler
+from tools.pt_snap import handler as pt_snap_handler
 
 __all__ = []

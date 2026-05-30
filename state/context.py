@@ -97,12 +97,21 @@ class AnalysisContext:
     def snapshot(self) -> Dict[str, Any]:
         """Return a snapshot of the current context."""
         result = {
-            k: v for k, v in self.__dict__.items()
+            k: self._json_safe(v) for k, v in self.__dict__.items()
             if not k.startswith('_') and v is not None
         }
-        result.update(self._values)
-        result["_candidates"] = dict(self._candidates)
+        result.update({k: self._json_safe(v) for k, v in self._values.items()})
+        result["_candidates"] = self._json_safe(self._candidates)
         return result
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {k: self._json_safe(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        return value
 
 
 @dataclass

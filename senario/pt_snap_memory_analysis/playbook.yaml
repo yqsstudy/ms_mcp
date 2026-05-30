@@ -1,0 +1,56 @@
+id: "pt_snap_memory_analysis"
+name: "PyTorch 内存快照分析剧本"
+description: "用于分析 PyTorch memory snapshot SQLite 数据库中的显存分配、峰值、调用栈与疑似泄漏问题。"
+keywords: ["memory snapshot", "PyTorch", "显存", "内存", "内存泄漏", "memory peak", "allocation", "pt_snap"]
+
+steps:
+  - step: 1
+    tool_name: "pt_snap_set_focus"
+    action: "设置 PyTorch memory snapshot SQLite 数据库作为当前分析目标，并可选锁定 device_id。"
+    outputs:
+      - key: "pt_snap_db_path"
+        from_path: "result.db_path"
+      - key: "pt_snap_device_id"
+        from_path: "result.device_id"
+      - key: "pt_snap_available_devices"
+        from_path: "result.available_devices"
+
+  - step: 2
+    tool_name: "pt_snap_list_templates"
+    action: "列出可用的内存快照 SQL 查询模板，按 basic/statistical/business 分类选择分析方向。"
+    requires: ["pt_snap_set_focus"]
+    outputs:
+      - key: "pt_snap_template_candidates"
+        from_path: "result.templates"
+        type: "candidates"
+    decision_point:
+      description: "请选择要执行的内存快照分析模板"
+      selections:
+        - key: "pt_snap_template"
+          from_candidates: "pt_snap_template_candidates"
+          selection_field: "name"
+
+  - step: 3
+    tool_name: "pt_snap_get_template_info"
+    action: "查看所选模板的参数、SQL 与输出结构，确定执行查询所需参数。"
+    requires: ["pt_snap_list_templates"]
+    context_inputs:
+      name: "pt_snap_template"
+    outputs:
+      - key: "pt_snap_template_params"
+        from_path: "result.parameters"
+      - key: "pt_snap_template_output_schema"
+        from_path: "result.output_schema"
+
+  - step: 4
+    tool_name: "pt_snap_execute_query"
+    action: "执行所选模板查询，返回内存快照分析结果。"
+    requires: ["pt_snap_get_template_info"]
+    context_inputs:
+      template: "pt_snap_template"
+      device_id: "pt_snap_device_id"
+    outputs:
+      - key: "pt_snap_query_rows"
+        from_path: "result.rows"
+      - key: "pt_snap_query_row_count"
+        from_path: "result.row_count"

@@ -642,7 +642,7 @@ class PlaybookNotFoundError(DAGError):
 请选择以下具体分析方向之一：
 - fast_slow_rank (慢节点排查)
 - communication_analysis (通信分析)
-- memory_analysis (内存分析)
+- pt_snap_memory_analysis (PyTorch 内存快照分析)
 ```
 
 ---

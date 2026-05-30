@@ -379,6 +379,15 @@ def get_client() -> CppBackendClient:
     return _client
 
 
+def backend_status() -> dict[str, Any]:
+    """Return a JSON-safe snapshot of backend readiness."""
+    return {
+        "url": settings.cpp_backend_url,
+        "connected": bool(_client and _client.is_connected),
+        "mode": "connected" if _client and _client.is_connected else "degraded",
+    }
+
+
 async def initialise(
     url: str = settings.cpp_backend_url,
     request_timeout: float = settings.cpp_request_timeout,

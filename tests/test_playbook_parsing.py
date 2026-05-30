@@ -306,6 +306,44 @@ class TestPlaybookRegistryParsing:
         assert step.step is None
         assert step.requires is None
 
+    def test_routing_hints_include_selectable_playbook_ids_and_limited_keywords(self):
+        """Test routing hints are generated from loaded selectable playbooks."""
+        registry = PlaybookRegistry()
+        registry._playbooks = {
+            "selectable": Playbook(
+                id="selectable",
+                name="Selectable Playbook",
+                description="Selectable description",
+                keywords=["alpha", "beta", "gamma", "delta"],
+                steps=[PlaybookStep(step=1, tool_name="step_one", action="Step one", requires=[])],
+            ),
+            "abstract": Playbook(
+                id="abstract",
+                name="Abstract Playbook",
+                description="Abstract description",
+                keywords=["hidden"],
+                steps=[PlaybookStep(step=1, tool_name="abstract_step", action="Abstract step", requires=[])],
+                is_abstract=True,
+            ),
+            "mixin": Playbook(
+                id="mixin",
+                name="Mixin Playbook",
+                description="Mixin description",
+                keywords=["internal"],
+                steps=[PlaybookStep(step=1, tool_name="mixin_step", action="Mixin step", requires=[])],
+                type="mixin",
+            ),
+        }
+
+        hints = registry.get_routing_hints(keyword_limit=2)
+
+        assert "selectable" in hints
+        assert "Selectable Playbook" in hints
+        assert "alpha, beta" in hints
+        assert "gamma" not in hints
+        assert "abstract" not in hints
+        assert "mixin" not in hints
+
 
 class TestInheritanceWithNewFields:
     """Tests for inheritance with new fields."""

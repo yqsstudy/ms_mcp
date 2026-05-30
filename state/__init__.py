@@ -43,13 +43,15 @@ Usage
 import sys
 sys.path = [p for p in sys.path if '.conda' not in p]
 
-from .session import SessionState, state
+from .session import SessionState, get_current_state, state, use_session_state
 from .context import ContextBoard, AnalysisContext, ExecutionRecord
 from .navigator import StepNavigator
 
 __all__ = [
     "SessionState",
     "state",
+    "get_current_state",
+    "use_session_state",
     "ContextBoard",
     "AnalysisContext",
     "ExecutionRecord",

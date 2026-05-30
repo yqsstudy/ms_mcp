@@ -27,8 +27,10 @@ from __future__ import annotations
 import sys
 sys.path = [p for p in sys.path if '.conda' not in p]
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, List, TYPE_CHECKING
+from typing import Any, Iterator, Optional, Tuple, List, TYPE_CHECKING
 
 import mcp.types as types
 
@@ -465,3 +467,17 @@ class SessionState:
 
 # Global singleton (for stdio mode)
 state = SessionState()
+_current_state: ContextVar[SessionState] = ContextVar("current_session_state", default=state)
+
+
+def get_current_state() -> SessionState:
+    return _current_state.get()
+
+
+@contextmanager
+def use_session_state(session_state: SessionState) -> Iterator[SessionState]:
+    token = _current_state.set(session_state)
+    try:
+        yield session_state
+    finally:
+        _current_state.reset(token)
