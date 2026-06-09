@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional, Type, Union
-from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
+from pydantic import BaseModel as PydanticBaseModel, ValidationError, Field, field_validator, model_validator, ConfigDict
+from pydantic.alias_generators import to_camel
 import mcp.types as types
 
 from utils.logger import logger
@@ -27,6 +28,9 @@ from utils.logger import logger
 # --------------------------------------------------------------------
 # Pydantic Models for each internal tool
 # --------------------------------------------------------------------
+
+class BaseModel(PydanticBaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 class ImportTraceFileParams(BaseModel):
     """Parameters for import_trace_file tool."""
@@ -231,6 +235,17 @@ TOOL_PARAM_MODELS: Dict[str, Type[BaseModel]] = {
 # Validation functions
 # --------------------------------------------------------------------
 
+def _field_display_name(model_class: Type[BaseModel] | None, name: Any) -> str:
+    """Return the Python/snake_case field name for a Pydantic error location."""
+    text = str(name)
+    if not model_class:
+        return text
+    for field_name, field_info in model_class.model_fields.items():
+        if text == field_name or text == field_info.alias:
+            return field_name
+    return text
+
+
 def format_validation_error(e: ValidationError, tool_name: str) -> str:
     """Format Pydantic validation error into LLM-friendly message.
 
@@ -243,10 +258,11 @@ def format_validation_error(e: ValidationError, tool_name: str) -> str:
     """
 
     error_parts = []
+    model_class = TOOL_PARAM_MODELS.get(tool_name)
 
     for error in e.errors():
         field_path = error.get('loc', ['unknown'])
-        field_name = field_path[-1] if field_path else 'unknown'
+        field_name = _field_display_name(model_class, field_path[-1] if field_path else 'unknown')
         error_type = error.get('type', 'unknown')
         message = error.get('msg', 'Unknown error')
         input_value = error.get('input', None)
@@ -369,8 +385,8 @@ def validate_tool_params(tool_name: str, params: Dict[str, Any]) -> tuple[bool, 
         # Pydantic 校验 + 自动类型转换
         validated = model_class.model_validate(params)
 
-        # 转换为 dict，保留所有字段（包括 None）
-        validated_params = validated.model_dump(exclude_none=False)
+        # 转换为 dict，保留所有字段（包括 None），使用默认的 snake_case 键名供内部 handler 调用
+        validated_params = validated.model_dump(exclude_none=False, by_alias=False)
 
         logger.debug("参数校验成功: {} → {}", tool_name, validated_params)
         return True, validated_params, None
@@ -395,7 +411,7 @@ def get_param_schema_for_tool(tool_name: str) -> Optional[Dict[str, Any]]:
     """
     model_class = TOOL_PARAM_MODELS.get(tool_name)
     if model_class:
-        return model_class.model_json_schema()
+        return model_class.model_json_schema(by_alias=False)
     return None
 
 
@@ -410,6 +426,6 @@ def get_required_fields(tool_name: str) -> List[str]:
     """
     model_class = TOOL_PARAM_MODELS.get(tool_name)
     if model_class:
-        schema = model_class.model_json_schema()
+        schema = model_class.model_json_schema(by_alias=False)
         return schema.get('required', [])
     return []

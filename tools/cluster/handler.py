@@ -62,9 +62,6 @@ async def communication_duration_slow_rank_list(
             params=params,
         )
 
-        # === 注册结果到上下文黑板 ===
-        current_state.context_board.register_result("communication_duration_slow_rank_list", body)
-
         # === 记录执行历史 ===
         current_state.mark_tool_executed("communication_duration_slow_rank_list", {
             "iteration_id": iterationId,
@@ -104,11 +101,6 @@ async def communication_duration_iterations(
         compare_list = []
         if isinstance(body, dict) and "iterationOrRankId" in body:
             compare_list = body["iterationOrRankId"].get("compare", [])
-
-        # === 注册结果到上下文黑板 ===
-        current_state.context_board.register_result("communication_duration_iterations", {
-            "iterationList": compare_list
-        })
 
         # === 记录执行历史 ===
         current_state.mark_tool_executed("communication_duration_iterations", {

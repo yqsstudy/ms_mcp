@@ -47,6 +47,10 @@ class Settings(BaseSettings):
         r"C:\Users\Administrator\.mindstudio_insight",
         description="Path to the C++ backend log directory."
     )
+    cpp_mock_mode: bool = Field(
+        False,
+        description="Return deterministic mock C++ backend responses without starting or connecting to the backend."
+    )
 
     # ------------------------------------------------------------------
     # MCP server

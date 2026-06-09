@@ -46,7 +46,7 @@ from mapping.registry import registry, PlaybookRegistry
 from utils.decorators import INTERNAL_TOOLS
 from utils.logger import logger
 from utils.param_validation import validate_tool_params
-from utils.response import format_error
+from utils.response import format_error, structured_fatal_error, structured_success, structured_tool_result
 from state import SessionState, get_current_state, use_session_state
 
 if TYPE_CHECKING:
@@ -274,11 +274,10 @@ async def call_tool(
         if not tool_name or tool_name not in INTERNAL_TOOLS:
             return _log_tool_response(
                 name,
-                format_error(
-                    code="UNKNOWN_INTERNAL_TOOL",
-                    message=f"Unknown internal tool: {tool_name}",
-                    next_action="Call search_profiler_tools and choose a tool from the returned playbook schema.",
-                    details={"tool_name": tool_name, "available_tools": sorted(INTERNAL_TOOLS)},
+                structured_fatal_error(
+                    "INVALID_PARAMETER",
+                    f"Unknown internal tool: {tool_name}",
+                    data={"tool_name": tool_name, "available_tools": sorted(INTERNAL_TOOLS)},
                 ),
                 started_at,
                 "error",
@@ -288,7 +287,7 @@ async def call_tool(
 
         # === 0. 全局硬性兜底拦截：任何分析工具执行前，必须至少导入过一次 Trace 文件！ ===
         valid_history = current_state.execution_history
-        if tool_name not in TOOLS_WITHOUT_TRACE_IMPORT and "import_trace_file" not in valid_history:
+        if tool_name != "import_trace_file" and tool_name not in TOOLS_WITHOUT_TRACE_IMPORT and "import_trace_file" not in valid_history:
             error_msg = (
                 f"⛔️ 全局硬性拦截：未初始化分析目标！\n\n"
                 f"在调用任何分析工具（如 `{tool_name}`）之前，你必须第一步调用 `import_trace_file` "
@@ -299,11 +298,13 @@ async def call_tool(
             logger.warning("Blocked Execution: Global assertion failed. Missing 'import_trace_file'.")
             return _log_tool_response(
                 name,
-                format_error(
-                    code="TRACE_NOT_IMPORTED",
-                    message=error_msg,
-                    next_action="Call import_trace_file with a valid profiling JSON file path before backend analysis tools.",
-                    details={"tool_name": tool_name, "execution_history": valid_history},
+                structured_tool_result(
+                    status="NEEDS_USER_INPUT",
+                    reason="MISSING_REQUIRED_PARAMETER",
+                    retryable=False,
+                    required_inputs=[{"name": "profile_path", "type": "string", "description": "请提供 profiling JSON 文件绝对路径，并先调用 import_trace_file。"}],
+                    data={"tool_name": tool_name, "execution_history": valid_history},
+                    user_message=error_msg,
                 ),
                 started_at,
                 "blocked",
@@ -344,11 +345,13 @@ async def call_tool(
             logger.warning("参数校验拦截: {} - {}", tool_name, validation_error)
             return _log_tool_response(
                 name,
-                format_error(
-                    code="PARAM_VALIDATION_FAILED",
-                    message=validation_error,
-                    next_action="Regenerate arguments according to the current tool input schema.",
-                    details={"tool_name": tool_name, "input_schema": internal.get("input_schema", {})},
+                structured_tool_result(
+                    status="NEEDS_USER_INPUT",
+                    reason="MISSING_REQUIRED_PARAMETER",
+                    retryable=False,
+                    required_inputs=[{"name": "arguments", "type": "object", "description": validation_error}],
+                    data={"tool_name": tool_name, "input_schema": internal.get("input_schema", {})},
+                    user_message=validation_error,
                 ),
                 started_at,
                 "validation_error",
@@ -383,11 +386,10 @@ async def call_tool(
             logger.warning("Blocked Execution: LLM tried to skip steps. Missing: {}", missing)
             return _log_tool_response(
                 name,
-                format_error(
-                    code="PREREQUISITE_NOT_MET",
-                    message=error_msg,
-                    next_action="Execute the missing prerequisite tools in playbook order before retrying.",
-                    details={"tool_name": tool_name, "missing": missing, "execution_history": current_state.execution_history},
+                structured_fatal_error(
+                    "INVALID_PARAMETER",
+                    error_msg,
+                    data={"tool_name": tool_name, "missing": missing, "execution_history": current_state.execution_history},
                 ),
                 started_at,
                 "blocked",
@@ -396,7 +398,23 @@ async def call_tool(
         # === 6. 执行工具 ===
         handler = internal["handler"]
         try:
-            results = await handler(**validated_args)
+            import inspect
+            sig = inspect.signature(handler)
+            handler_params = list(sig.parameters.keys())
+            
+            mapped_args = {}
+            for k, v in validated_args.items():
+                normalized_k = k.lower().replace('_', '')
+                matched = False
+                for hp in handler_params:
+                    if hp.lower().replace('_', '') == normalized_k:
+                        mapped_args[hp] = v
+                        matched = True
+                        break
+                if not matched:
+                    mapped_args[k] = v
+                    
+            results = await handler(**mapped_args)
 
             # === 7. 结果注册（从 Playbook.outputs 获取提取规则）===
             if playbook:
@@ -430,26 +448,55 @@ async def call_tool(
                         break
 
             # === 10. 自动推进：追加下一步信息 ===
-            next_step_info = _build_next_step_info(tool_name)
-            if next_step_info and results:
-                for i in range(len(results) - 1, -1, -1):
-                    if isinstance(results[i], types.TextContent):
-                        results[i] = types.TextContent(
-                            type="text",
-                            text=results[i].text + next_step_info
-                        )
-                        break
+            # Check if the result is an error message returned by the tool handler
+            is_tool_error = False
+            if results and isinstance(results[0], types.TextContent):
+                first_text = results[0].text.strip()
+                if first_text.startswith("ERROR:") or "EXECUTION BLOCKED:" in first_text:
+                    is_tool_error = True
 
-            return _log_tool_response(name, results, started_at)
+            if not is_tool_error:
+                next_step_info = _build_next_step_info(tool_name)
+                if next_step_info and results:
+                    for i in range(len(results) - 1, -1, -1):
+                        if isinstance(results[i], types.TextContent):
+                            results[i] = types.TextContent(
+                                type="text",
+                                text=results[i].text + next_step_info
+                            )
+                            break
+
+            if is_tool_error:
+                error_message = "Tool execution failed"
+                if results and isinstance(results[0], types.TextContent):
+                    error_message = results[0].text.strip()
+                return _log_tool_response(
+                    name,
+                    structured_fatal_error("BACKEND_ERROR", error_message),
+                    started_at,
+                    "tool_error",
+                )
+
+            result_text = "\n".join(item.text for item in results if isinstance(item, types.TextContent))
+            next_step, progress = _build_structured_next_step()
+            return _log_tool_response(
+                name,
+                structured_success(
+                    {"text": result_text},
+                    next_step=next_step,
+                    progress=progress,
+                    text=result_text,
+                ),
+                started_at,
+            )
         except Exception as exc:
             logger.exception("Error executing internal tool '{}': {}", tool_name, exc)
             return _log_tool_response(
                 name,
-                format_error(
-                    code="INTERNAL_TOOL_ERROR",
-                    message=f"Internal tool execution failed: {exc}",
-                    recoverable=False,
-                    details={"tool_name": tool_name},
+                structured_fatal_error(
+                    "BACKEND_ERROR",
+                    f"Internal tool execution failed: {exc}",
+                    data={"tool_name": tool_name},
                 ),
                 started_at,
                 "exception",
@@ -471,6 +518,31 @@ async def call_tool(
 # --------------------------------------------------------------------
 # Helper: Build next step info for auto-progress
 # --------------------------------------------------------------------
+
+def _build_structured_next_step() -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    """Return the current navigator next step and progress as structured data."""
+    from state.navigator import StepNavigator
+
+    current_state = get_current_state()
+    if not current_state.current_playbook_id:
+        return None, {}
+    playbook = registry.get_playbook(current_state.current_playbook_id)
+    if not playbook:
+        return None, {}
+    navigator = StepNavigator(current_state)
+    next_step = navigator.get_current_step(playbook)
+    progress = navigator.get_progress(playbook)
+    if not next_step:
+        return None, progress
+    tool_meta = INTERNAL_TOOLS.get(next_step.tool_name, {})
+    schema = tool_meta.get("input_schema", {})
+    return {
+        "tool_name": next_step.tool_name,
+        "action": next_step.action,
+        "schema": schema if isinstance(schema, dict) else {},
+        "progress": progress,
+    }, progress
+
 
 def _build_next_step_info(completed_tool: str) -> Optional[str]:
     """Build next step info to append to tool response.

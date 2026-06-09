@@ -332,6 +332,11 @@ class SessionState:
         if cluster_path:
             return cluster_path
 
+        from config import settings
+        if settings.cpp_mock_mode:
+            # 在 Mock 模式下，直接返回一个模拟的集群路径，防止阻塞流程
+            return "/mock/cluster/path"
+
         paths = self.cluster_paths
 
         if len(paths) == 1:

@@ -84,3 +84,65 @@ def format_with_hints(
 def error_text(exc: Exception) -> list[types.TextContent]:
     """Format an exception as an MCP TextContent error response."""
     return [types.TextContent(type="text", text=f"ERROR: {exc}")]
+
+
+def structured_tool_result(
+    *,
+    status: str = "SUCCESS",
+    data: dict | None = None,
+    reason: str | None = None,
+    retryable: bool | None = None,
+    suggested_retry_after_ms: int | None = None,
+    event_name: str | None = None,
+    operation_id: str | None = None,
+    required_inputs: list[dict] | None = None,
+    message_params: dict | None = None,
+    user_message: str | None = None,
+    developer_message: str | None = None,
+    next_step: dict | None = None,
+    progress: dict | None = None,
+    text: str | None = None,
+) -> list[types.TextContent]:
+    """Return the demo structured control-flow envelope as JSON text."""
+    control_flow: dict[str, Any] = {"status": status}
+    for key, value in {
+        "reason": reason,
+        "retryable": retryable,
+        "suggested_retry_after_ms": suggested_retry_after_ms,
+        "event_name": event_name,
+        "operation_id": operation_id,
+        "required_inputs": required_inputs,
+        "message_params": message_params,
+        "user_message": user_message,
+        "developer_message": developer_message,
+    }.items():
+        if value is not None:
+            control_flow[key] = value
+    payload = {
+        "control_flow": control_flow,
+        "data": data or {},
+    }
+    if next_step is not None:
+        payload["next_step"] = next_step
+    if progress is not None:
+        payload["progress"] = progress
+    if text:
+        payload["text"] = text
+    return [types.TextContent(type="text", text=fmt_json(payload))]
+
+
+def structured_success(data: dict | None = None, *, next_step: dict | None = None, progress: dict | None = None, text: str | None = None) -> list[types.TextContent]:
+    return structured_tool_result(status="SUCCESS", data=data, next_step=next_step, progress=progress, text=text)
+
+
+def structured_fatal_error(reason: str, message: str, *, data: dict | None = None) -> list[types.TextContent]:
+    payload = {"error": message}
+    if data:
+        payload.update(data)
+    return structured_tool_result(
+        status="FATAL_ERROR",
+        reason=reason,
+        retryable=False,
+        data=payload,
+        developer_message=message,
+    )

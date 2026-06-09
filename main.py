@@ -136,7 +136,10 @@ async def _main(argv: list[str] | None = None) -> None:
         runtime.log_file,
     )
 
-    start_profiler_server_if_needed()
+    if settings.cpp_mock_mode:
+        logger.warning("C++ mock mode enabled; skipping profiler server startup")
+    else:
+        start_profiler_server_if_needed()
 
     # --- Connect to C++ backend ---
     try:

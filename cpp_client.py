@@ -18,9 +18,10 @@ Event    ← {"type":"event",    "id":N, "event":"...",  "moduleName":"...", "re
 """
 
 import asyncio
+import copy
 import itertools
 import json
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -34,6 +35,181 @@ from utils.errors import (
     RequestTimeoutError,
 )
 from utils.logger import logger
+
+
+def _mock_cpp_response(
+    command: str,
+    module_name: str,
+    params: Optional[Dict[str, Any]] = None,
+    project_name: Optional[str] = None,
+    file_id: Optional[str] = None,
+) -> Any:
+    """Return deterministic mock bodies for C++ backend commands."""
+    request_params = params or {}
+    mock_project_name = project_name or request_params.get("projectName") or "mock_project"
+    mock_file_id = file_id or request_params.get("path", ["mock_trace.msprof"])[0]
+
+    fixtures: dict[tuple[str, str], Any] = {
+        ("global", "heartCheck"): {
+            "mock": True,
+            "ok": True,
+            "status": "OK",
+        },
+        ("global", "files/get"): {
+            "mock": True,
+            "path": request_params.get("path", ""),
+            "files": [
+                {"name": "mock_trace.msprof", "type": "file", "size": 1024},
+                {"name": "mock_profile", "type": "directory", "size": 0},
+            ],
+        },
+        ("timeline", "import/action"): {
+            "mock": True,
+            "success": True,
+            "projectName": mock_project_name,
+            "project_name": mock_project_name,
+            "fileId": mock_file_id,
+            "file_id": mock_file_id,
+            "clusterPath": "mock_cluster_path",
+            "cluster_path": "mock_cluster_path",
+            "message": "Mock trace file imported",
+        },
+        ("timeline", "unit/kernelDetail"): {
+            "mock": True,
+            "rankId": request_params.get("rankId", "0"),
+            "name": request_params.get("name", "mock_operator"),
+            "duration": 1200,
+            "startTime": 1000,
+            "endTime": 2200,
+            "pid": "mock_pid",
+            "tid": "mock_tid",
+            "id": "mock_kernel_id",
+            "metadata": [{"pid": "mock_pid", "tid": "mock_tid", "metaType": "HCCL"}],
+        },
+        ("timeline", "unit/threadDetail"): {
+            "mock": True,
+            "items": [
+                {
+                    "id": request_params.get("id", "mock_kernel_id"),
+                    "name": "mock_thread_event",
+                    "startTime": request_params.get("startTime", 1000),
+                    "endTime": request_params.get("startTime", 1000) + 100,
+                    "depth": request_params.get("depth", 0),
+                }
+            ],
+        },
+        ("timeline", "unit/flows"): {
+            "mock": True,
+            "flows": [
+                {
+                    "source": request_params.get("id", "mock_op_id"),
+                    "target": "mock_peer_op_id",
+                    "startTime": request_params.get("startTime", 1000),
+                    "endTime": request_params.get("endTime", 2000),
+                }
+            ],
+        },
+        ("timeline", "unit/threads"): {
+            "mock": True,
+            "data": [
+                {
+                    "id": "mock_op_id",
+                    "name": "mock_operator",
+                    "startTime": request_params.get("startTime", 1000),
+                    "endTime": request_params.get("endTime", 2000),
+                    "pid": "mock_pid",
+                    "tid": "mock_tid",
+                    "metaType": "HCCL",
+                }
+            ],
+        },
+        ("communication", "communication/duration/iterations"): {
+            "mock": True,
+            "iterationOrRankId": {
+                "compare": ["1", "2"],
+                "baseline": ["0"],
+            },
+        },
+        ("communication", "communication/matrix/group"): {
+            "mock": True,
+            "data": [
+                {
+                    "groupIdHash": {"compare": "mock_group_hash"},
+                    "pgName": "mock_pg",
+                    "duration": 120.5,
+                    "rankList": ["0", "1"],
+                }
+            ],
+        },
+        ("communication", "communication/duration/slow-rank/list"): {
+            "mock": True,
+            "data": [
+                {
+                    "rankId": "0",
+                    "duration": 120.5,
+                    "operatorName": request_params.get("operatorName", "Total Op Info"),
+                    "groupIdHash": request_params.get("groupIdHash", "mock_group_hash"),
+                }
+            ],
+            "summary": {"slowRankCount": 1},
+        },
+    }
+
+    fixture = fixtures.get((module_name, command))
+    if fixture is not None:
+        return copy.deepcopy(fixture)
+
+    logger.warning("Mock C++ backend fallback for command={} module={}", command, module_name)
+    return {
+        "mock": True,
+        "command": command,
+        "moduleName": module_name,
+        "params": copy.deepcopy(request_params),
+        "projectName": project_name,
+        "fileId": file_id,
+        "message": "Mock C++ backend response",
+    }
+
+
+class MockCppBackendClient:
+    """Async-compatible mock implementation of the C++ backend client."""
+
+    def __init__(self, url: str = settings.cpp_backend_url) -> None:
+        self.url = url
+        self._connected = False
+        self._event_handlers: Dict[str, list[Callable[[Dict[str, Any]], Any]]] = {}
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    async def connect(self) -> None:
+        self._connected = True
+        logger.warning("C++ mock mode enabled; skipping WebSocket connection to {}", self.url)
+
+    async def close(self) -> None:
+        self._connected = False
+        logger.info("Disconnected from mock C++ backend")
+
+    async def request(
+        self,
+        command: str,
+        module_name: str,
+        params: Optional[Dict[str, Any]] = None,
+        project_name: Optional[str] = None,
+        file_id: Optional[str] = None,
+    ) -> Any:
+        if not self.is_connected:
+            raise NotConnectedError("MockCppBackendClient is not connected. Has connect() been called?")
+        logger.debug("→ mock request command={} module={}", command, module_name)
+        return _mock_cpp_response(command, module_name, params, project_name, file_id)
+
+    def on_event(
+        self,
+        event_name: str,
+        handler: Callable[[Dict[str, Any]], Any],
+    ) -> None:
+        self._event_handlers.setdefault(event_name, []).append(handler)
 
 
 class CppBackendClient:
@@ -366,10 +542,12 @@ class CppBackendClient:
 # Module-level singleton
 # --------------------------------------------------------------------
 
-_client: Optional[CppBackendClient] = None
+BackendClient = Union[CppBackendClient, MockCppBackendClient]
+
+_client: Optional[BackendClient] = None
 
 
-def get_client() -> CppBackendClient:
+def get_client() -> BackendClient:
     """Return the singleton client (must call :func:`initialise` first)."""
     if _client is None:
         raise NotConnectedError(
@@ -381,10 +559,11 @@ def get_client() -> CppBackendClient:
 
 def backend_status() -> dict[str, Any]:
     """Return a JSON-safe snapshot of backend readiness."""
+    connected = bool(_client and _client.is_connected)
     return {
         "url": settings.cpp_backend_url,
-        "connected": bool(_client and _client.is_connected),
-        "mode": "connected" if _client and _client.is_connected else "degraded",
+        "connected": connected,
+        "mode": "mock" if isinstance(_client, MockCppBackendClient) else ("connected" if connected else "degraded"),
     }
 
 
@@ -393,9 +572,14 @@ async def initialise(
     request_timeout: float = settings.cpp_request_timeout,
     reconnect_interval: float = settings.cpp_reconnect_interval,
     keepalive_interval: float = settings.cpp_keepalive_interval,
-) -> CppBackendClient:
+) -> BackendClient:
     """Create and connect the module-level singleton client."""
     global _client
+    if settings.cpp_mock_mode:
+        _client = MockCppBackendClient(url=url)
+        await _client.connect()
+        return _client
+
     _client = CppBackendClient(
         url=url,
         request_timeout=request_timeout,

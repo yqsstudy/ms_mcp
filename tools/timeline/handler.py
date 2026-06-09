@@ -105,9 +105,6 @@ async def query_communication_kernel_detail(
         # Also set current_kernel for fallback compatibility if needed
         timeline_module.set("current_kernel", body)
 
-        # === 注册结果到上下文黑板 ===
-        current_state.context_board.register_result("query_communication_kernel_detail", body)
-
         # === 记录执行历史 ===
         current_state.mark_tool_executed("query_communication_kernel_detail", {
             "rank_id": rank_id,
@@ -205,8 +202,6 @@ async def get_thread_detail(
         if duration is not None and kernel:
             kernel["duration"] = duration
 
-        # === 注册结果到上下文黑板 ===
-        current_state.context_board.register_result("get_thread_detail", body)
 
         # === 记录执行历史 ===
         current_state.mark_tool_executed("get_thread_detail", {
